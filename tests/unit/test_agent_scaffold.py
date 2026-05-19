@@ -1,19 +1,46 @@
-"""Phase 1 scaffold tests — exercise the no-op graph end-to-end."""
+"""Smoke tests — exercise the compiled graph end-to-end with a real PRContext."""
 
 from __future__ import annotations
 
-from terraform_review_agent.agent import ReviewState, agent
+from terraform_review_agent.agent import agent
+from terraform_review_agent.utils.state import (
+    ChangedFile,
+    PRContext,
+    ReviewState,
+)
 
 
-def test_graph_runs_all_nodes() -> None:
-    final = agent.invoke(ReviewState())
+def _pr_context(files: list[ChangedFile]) -> PRContext:
+    return PRContext(
+        repository="acme/example",
+        pr_number=1,
+        base_sha="aaaaaaa",
+        head_sha="bbbbbbb",
+        base_ref="main",
+        head_ref="feature/x",
+        changed_files=files,
+    )
 
-    assert final["started"] is True
-    assert final["security_done"] is True
-    assert final["cost_done"] is True
-    assert final["style_done"] is True
-    assert final["aggregated"] is True
-    assert final["posted"] is True
+
+def test_graph_runs_with_terraform_changes() -> None:
+    pr = _pr_context([ChangedFile(path="main.tf", status="modified")])
+
+    final = agent.invoke(ReviewState(pr=pr))
+
+    assert final["skipped"] is False
+    assert final["security"] == []
+    assert final["cost"] == []
+    assert final["style"] == []
+    assert final["comment_markdown"] == ""
+
+
+def test_graph_skips_when_no_terraform_files_changed() -> None:
+    pr = _pr_context([ChangedFile(path="README.md", status="modified")])
+
+    final = agent.invoke(ReviewState(pr=pr))
+
+    assert final["skipped"] is True
+    assert "no terraform files changed" in (final["skip_reason"] or "")
 
 
 def test_graph_topology_contains_expected_nodes() -> None:

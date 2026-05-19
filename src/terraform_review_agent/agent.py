@@ -1,52 +1,58 @@
-"""LangGraph scaffold for the Terraform review agent.
+"""LangGraph wiring for the Terraform review agent.
 
-Topology (no-op nodes for Phase 1 — real logic lands in later phases):
+Topology — specialist branches fan out in parallel, then aggregate:
 
     start ──► [security ∥ cost ∥ style] ──► aggregator ──► post_comment
 
-Specialist branches write to disjoint state fields so no reducer is required.
+The specialist branches write to disjoint state fields, so no reducers are
+required. Real node implementations land in Phases 3-5; for now they are
+no-op stubs that preserve the topology and let ``make test`` exercise the
+compiled graph end-to-end.
 """
 
 from __future__ import annotations
 
 from langgraph.graph import END, START, StateGraph
-from pydantic import BaseModel, Field
+
+from terraform_review_agent.utils.state import ReviewState
 
 
-class ReviewState(BaseModel):
-    """Placeholder state — replaced with the full schema in Phase 2."""
+def start_node(state: ReviewState) -> dict[str, object]:
+    """Branch on whether the PR touches terraform files at all."""
 
-    started: bool = False
-    security_done: bool = False
-    cost_done: bool = False
-    style_done: bool = False
-    aggregated: bool = False
-    posted: bool = False
-    comment_markdown: str | None = Field(default=None)
+    if not state.pr.has_terraform_changes:
+        return {"skipped": True, "skip_reason": "no terraform files changed"}
+    return {"skipped": False}
 
 
-def start_node(state: ReviewState) -> dict[str, bool]:
-    return {"started": True}
+def security_node(state: ReviewState) -> dict[str, object]:
+    """Placeholder — Phase 4 wires tfsec + checkov + LLM normalization."""
+
+    return {"security": []}
 
 
-def security_node(state: ReviewState) -> dict[str, bool]:
-    return {"security_done": True}
+def cost_node(state: ReviewState) -> dict[str, object]:
+    """Placeholder — Phase 4 wires infracost + LLM annotation."""
+
+    return {"cost": []}
 
 
-def cost_node(state: ReviewState) -> dict[str, bool]:
-    return {"cost_done": True}
+def style_node(state: ReviewState) -> dict[str, object]:
+    """Placeholder — Phase 4 wires terraform fmt + tflint + LLM."""
 
-
-def style_node(state: ReviewState) -> dict[str, bool]:
-    return {"style_done": True}
+    return {"style": []}
 
 
 def aggregator_node(state: ReviewState) -> dict[str, object]:
-    return {"aggregated": True, "comment_markdown": ""}
+    """Placeholder — Phase 5 renders the severity-ranked markdown comment."""
+
+    return {"comment_markdown": ""}
 
 
-def post_comment_node(state: ReviewState) -> dict[str, bool]:
-    return {"posted": True}
+def post_comment_node(state: ReviewState) -> dict[str, object]:
+    """Placeholder — Phase 6 wires the GitHub sticky-comment upsert."""
+
+    return {"posted_comment_id": None}
 
 
 def build_graph() -> StateGraph[ReviewState]:

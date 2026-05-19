@@ -80,12 +80,12 @@ Parallel branches write to disjoint fields — no reducer needed.
 - [x] `agent.py` with no-op nodes wired in the target topology — `make fmt lint type test` green
 
 ### Phase 2 — Core
-- [ ] `config.py` (pydantic-settings reading env)
-- [ ] `llm.py` (provider factory: openai / anthropic / google)
-- [ ] `utils/state.py` (`PRContext`, `ChangedFile`, `Finding`, `ReviewState`)
-- [ ] `github_client.py` (fetch PR + diff; sticky comment upsert via marker)
-- [ ] `entrypoint.py` (CLI invoked by the GH Action)
-- [ ] Unit tests for state models and the sticky-comment upsert logic
+- [x] `config.py` (pydantic-settings reading env)
+- [x] `llm.py` (provider factory: openai / anthropic / google)
+- [x] `utils/state.py` (`PRContext`, `ChangedFile`, `Finding`, `ReviewState`)
+- [x] `github_client.py` (fetch PR + diff; sticky comment upsert via marker)
+- [x] `entrypoint.py` (CLI invoked by the GH Action)
+- [x] Unit tests for state models and the sticky-comment upsert logic
 
 ### Phase 3 — Tools (one scanner per agent first)
 - [ ] `utils/tools.py` — `tfsec` wrapper (JSON output → structured)
