@@ -1,0 +1,526 @@
+"""Subprocess wrappers around the OSS Terraform scanners.
+
+Each wrapper:
+
+* Locates the scanner binary on ``PATH`` (raising :class:`ScannerError` if
+  missing).
+* Runs the scanner against a checkout of the PR's head commit.
+* Parses the scanner's structured output.
+* Returns a list of :class:`~terraform_review_agent.utils.state.Finding`
+  records in the agent's normalized severity vocabulary.
+
+Wrappers are ``@tool``-decorated so they can be bound to an LLM if we ever
+want one; for now Phase 4 specialist nodes call them directly via
+``.invoke({"working_dir": ...})``.
+
+This module also exposes :func:`prepare_file_payloads`, the per-file content
+cap + diff-only fallback used to keep specialist LLM prompts inside token
+budgets on very large PRs.
+"""
+
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
+from pathlib import Path
+from typing import Any, Literal
+
+import structlog
+from langchain_core.tools import tool
+from pydantic import BaseModel
+
+from terraform_review_agent.utils.state import ChangedFile, Finding, PRContext, Severity
+
+log = structlog.get_logger(__name__)
+
+
+DEFAULT_SCANNER_TIMEOUT_SECONDS = 300
+
+
+class ScannerError(RuntimeError):
+    """Raised when a scanner binary is missing or fails unrecoverably."""
+
+
+# ---------------------------------------------------------------------------
+# shared helpers
+# ---------------------------------------------------------------------------
+
+
+def _which_or_raise(binary: str) -> str:
+    found = shutil.which(binary)
+    if found is None:
+        raise ScannerError(f"required scanner binary not found on PATH: {binary!r}")
+    return found
+
+
+def _run(
+    cmd: list[str],
+    *,
+    cwd: Path,
+    timeout: int = DEFAULT_SCANNER_TIMEOUT_SECONDS,
+    ok_exit_codes: tuple[int, ...] = (0,),
+) -> subprocess.CompletedProcess[str]:
+    log.debug("scanner.run", cmd=cmd, cwd=str(cwd))
+    completed = subprocess.run(
+        cmd,
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    if completed.returncode not in ok_exit_codes:
+        tail = (completed.stderr or completed.stdout or "").strip()[:400]
+        raise ScannerError(f"{Path(cmd[0]).name!r} exited with code {completed.returncode}: {tail}")
+    return completed
+
+
+def _relpath(raw_path: str, working_dir: Path) -> str:
+    """Normalize a scanner-reported path to a workspace-relative POSIX path.
+
+    Some scanners (notably checkov) report a leading ``/`` to mean "relative to
+    the scanned directory" rather than a filesystem-absolute path. We treat
+    that as relative when the path doesn't sit inside ``working_dir``.
+    """
+
+    if not raw_path:
+        return ""
+    p = Path(raw_path)
+    if p.is_absolute():
+        try:
+            return p.relative_to(working_dir).as_posix()
+        except ValueError:
+            return p.as_posix().lstrip("/")
+    return p.as_posix()
+
+
+# ---------------------------------------------------------------------------
+# severity normalization tables
+# ---------------------------------------------------------------------------
+
+
+_TFSEC_SEVERITY: dict[str, Severity] = {
+    "CRITICAL": "critical",
+    "HIGH": "high",
+    "MEDIUM": "medium",
+    "LOW": "low",
+    "INFO": "info",
+}
+
+_CHECKOV_SEVERITY: dict[str, Severity] = {
+    "CRITICAL": "critical",
+    "HIGH": "high",
+    "MEDIUM": "medium",
+    "LOW": "low",
+    "INFO": "info",
+}
+
+_TFLINT_SEVERITY: dict[str, Severity] = {
+    "error": "high",
+    "warning": "medium",
+    "notice": "info",
+    "info": "info",
+}
+
+
+# ---------------------------------------------------------------------------
+# tfsec
+# ---------------------------------------------------------------------------
+
+
+def _parse_tfsec(payload: dict[str, Any], working_dir: Path) -> list[Finding]:
+    findings: list[Finding] = []
+    for item in payload.get("results") or []:
+        severity = _TFSEC_SEVERITY.get(
+            str(item.get("severity") or "").upper(),
+            "info",
+        )
+        location = item.get("location") or {}
+        rule_id = item.get("long_id") or item.get("rule_id") or "unknown"
+        if not rule_id.startswith("tfsec:"):
+            rule_id = f"tfsec:{rule_id}"
+        findings.append(
+            Finding(
+                agent="security",
+                severity=severity,
+                file=_relpath(location.get("filename") or "", working_dir),
+                line=location.get("start_line"),
+                rule=rule_id,
+                message=(
+                    item.get("description") or item.get("rule_description") or "tfsec finding"
+                ),
+                suggestion=item.get("resolution") or None,
+            )
+        )
+    return findings
+
+
+@tool
+def run_tfsec(working_dir: str) -> list[Finding]:
+    """Run tfsec under ``working_dir`` and return normalized security findings.
+
+    The scanner is invoked with ``--soft-fail`` so a non-zero exit caused by
+    findings does not raise; only invocation failures (missing binary, invalid
+    JSON, other non-zero exits) do.
+    """
+
+    binary = _which_or_raise("tfsec")
+    cwd = Path(working_dir)
+    completed = _run(
+        [binary, "--format", "json", "--soft-fail", "--no-colour", str(cwd)],
+        cwd=cwd,
+        ok_exit_codes=(0,),
+    )
+    try:
+        payload: dict[str, Any] = json.loads(completed.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise ScannerError(f"tfsec produced invalid JSON: {exc}") from exc
+    return _parse_tfsec(payload, cwd)
+
+
+# ---------------------------------------------------------------------------
+# checkov
+# ---------------------------------------------------------------------------
+
+
+def _parse_checkov(
+    payload: dict[str, Any] | list[dict[str, Any]],
+    working_dir: Path,
+) -> list[Finding]:
+    findings: list[Finding] = []
+    blocks = payload if isinstance(payload, list) else [payload]
+    for block in blocks:
+        results = (block.get("results") or {}).get("failed_checks") or []
+        for item in results:
+            severity = _CHECKOV_SEVERITY.get(
+                str(item.get("severity") or "").upper(),
+                "medium",
+            )
+            line_range = item.get("file_line_range") or []
+            start_line = line_range[0] if line_range else None
+            if start_line == 0:
+                start_line = None
+            check_id = item.get("check_id") or "unknown"
+            rule_id = check_id if check_id.lower().startswith("checkov") else f"checkov:{check_id}"
+            findings.append(
+                Finding(
+                    agent="security",
+                    severity=severity,
+                    file=_relpath(item.get("file_path") or "", working_dir),
+                    line=start_line,
+                    rule=rule_id,
+                    message=item.get("check_name") or "checkov finding",
+                    suggestion=item.get("guideline") or None,
+                )
+            )
+    return findings
+
+
+@tool
+def run_checkov(working_dir: str) -> list[Finding]:
+    """Run checkov under ``working_dir`` and return normalized security findings."""
+
+    binary = _which_or_raise("checkov")
+    cwd = Path(working_dir)
+    completed = _run(
+        [binary, "-d", str(cwd), "-o", "json", "--quiet", "--soft-fail"],
+        cwd=cwd,
+        ok_exit_codes=(0,),
+    )
+    if not completed.stdout.strip():
+        return []
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise ScannerError(f"checkov produced invalid JSON: {exc}") from exc
+    return _parse_checkov(payload, cwd)
+
+
+# ---------------------------------------------------------------------------
+# tflint
+# ---------------------------------------------------------------------------
+
+
+def _parse_tflint(payload: dict[str, Any], working_dir: Path) -> list[Finding]:
+    findings: list[Finding] = []
+    for issue in payload.get("issues") or []:
+        rule = issue.get("rule") or {}
+        rng = issue.get("range") or {}
+        start = rng.get("start") or {}
+        severity = _TFLINT_SEVERITY.get(
+            str(rule.get("severity") or "").lower(),
+            "info",
+        )
+        rule_name = rule.get("name") or "unknown"
+        findings.append(
+            Finding(
+                agent="style",
+                severity=severity,
+                file=_relpath(rng.get("filename") or "", working_dir),
+                line=start.get("line"),
+                rule=f"tflint:{rule_name}",
+                message=issue.get("message") or rule.get("name") or "tflint finding",
+                suggestion=rule.get("link") or None,
+            )
+        )
+    return findings
+
+
+@tool
+def run_tflint(working_dir: str) -> list[Finding]:
+    """Run tflint under ``working_dir`` and return normalized style findings.
+
+    Callers are responsible for ``tflint --init`` having installed any plugins
+    the project requires; this wrapper only invokes the scanner. tflint exits
+    non-zero (1/2) when issues are found, which is treated as a successful run.
+    """
+
+    binary = _which_or_raise("tflint")
+    cwd = Path(working_dir)
+    completed = _run(
+        [binary, "--format=json", "--recursive"],
+        cwd=cwd,
+        ok_exit_codes=(0, 1, 2),
+    )
+    try:
+        payload = json.loads(completed.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise ScannerError(f"tflint produced invalid JSON: {exc}") from exc
+    return _parse_tflint(payload, cwd)
+
+
+# ---------------------------------------------------------------------------
+# terraform fmt
+# ---------------------------------------------------------------------------
+
+
+@tool
+def run_terraform_fmt(working_dir: str) -> list[Finding]:
+    """Run ``terraform fmt -check`` and emit one finding per unformatted file.
+
+    ``terraform fmt -check`` exits 0 when everything is formatted and 3 when
+    one or more files differ from canonical style; both are expected outcomes
+    here. Each path on stdout becomes a single low-severity style finding.
+    """
+
+    binary = _which_or_raise("terraform")
+    cwd = Path(working_dir)
+    completed = _run(
+        [binary, "fmt", "-check", "-recursive", "-list=true", "-no-color"],
+        cwd=cwd,
+        ok_exit_codes=(0, 3),
+    )
+    findings: list[Finding] = []
+    for raw_line in (completed.stdout or "").splitlines():
+        path = raw_line.strip()
+        if not path:
+            continue
+        findings.append(
+            Finding(
+                agent="style",
+                severity="low",
+                file=_relpath(path, cwd),
+                line=None,
+                rule="terraform-fmt:unformatted",
+                message="File does not match `terraform fmt` canonical style.",
+                suggestion="Run `terraform fmt` locally and commit the result.",
+            )
+        )
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# infracost
+# ---------------------------------------------------------------------------
+
+
+_INFRACOST_THRESHOLDS: list[tuple[float, Severity]] = [
+    (100.0, "high"),
+    (10.0, "medium"),
+    (1.0, "low"),
+]
+
+
+def _severity_for_cost_delta(delta_monthly: float) -> Severity:
+    abs_delta = abs(delta_monthly)
+    for threshold, severity in _INFRACOST_THRESHOLDS:
+        if abs_delta >= threshold:
+            return severity
+    return "info"
+
+
+def _coerce_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_infracost_diff(payload: dict[str, Any], working_dir: Path) -> list[Finding]:
+    findings: list[Finding] = []
+    for project in payload.get("projects") or []:
+        project_path = project.get("name") or (project.get("metadata") or {}).get("path") or "."
+        diff = project.get("diff") or {}
+
+        for resource in diff.get("resources") or []:
+            monthly_delta = _coerce_float(resource.get("monthlyCost"))
+            if not monthly_delta:
+                continue
+            resource_name = resource.get("name") or "(unnamed resource)"
+            findings.append(
+                Finding(
+                    agent="cost",
+                    severity=_severity_for_cost_delta(monthly_delta),
+                    file=_relpath(project_path, working_dir),
+                    line=None,
+                    rule="infracost:resource-delta",
+                    message=(
+                        f"Estimated monthly cost change for `{resource_name}`: "
+                        f"${monthly_delta:+,.2f}"
+                    ),
+                    suggestion=None,
+                )
+            )
+
+        total_delta = _coerce_float(
+            diff.get("totalMonthlyCost") or project.get("diffTotalMonthlyCost")
+        )
+        if total_delta:
+            findings.append(
+                Finding(
+                    agent="cost",
+                    severity=_severity_for_cost_delta(total_delta),
+                    file=_relpath(project_path, working_dir),
+                    line=None,
+                    rule="infracost:total-delta",
+                    message=(
+                        f"Estimated total monthly cost change for project "
+                        f"`{project_path}`: ${total_delta:+,.2f}"
+                    ),
+                    suggestion=None,
+                )
+            )
+    return findings
+
+
+@tool
+def run_infracost_diff(working_dir: str, baseline_path: str) -> list[Finding]:
+    """Run ``infracost diff`` and return normalized cost findings.
+
+    ``baseline_path`` must point at a JSON file produced by
+    ``infracost breakdown --path <dir> --format json --out-file ...`` against
+    the PR's base ref. The reusable workflow is responsible for generating it
+    before this tool runs.
+    """
+
+    binary = _which_or_raise("infracost")
+    cwd = Path(working_dir)
+    completed = _run(
+        [
+            binary,
+            "diff",
+            "--path",
+            str(cwd),
+            "--compare-to",
+            baseline_path,
+            "--format",
+            "json",
+        ],
+        cwd=cwd,
+        ok_exit_codes=(0,),
+    )
+    try:
+        payload = json.loads(completed.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise ScannerError(f"infracost produced invalid JSON: {exc}") from exc
+    return _parse_infracost_diff(payload, cwd)
+
+
+# ---------------------------------------------------------------------------
+# per-file content cap + diff-only fallback
+# ---------------------------------------------------------------------------
+
+
+PER_FILE_CONTENT_CAP_BYTES = 32 * 1024
+TOTAL_CONTENT_THRESHOLD_BYTES = 256 * 1024
+TRUNCATION_MARKER = "\n... [content truncated by terraform-review-agent]"
+
+_TERRAFORM_SUFFIXES = (".tf", ".tfvars", ".tf.json", ".tfvars.json")
+
+PayloadMode = Literal["full", "truncated", "diff_only"]
+
+
+class FilePayload(BaseModel):
+    """A per-file content blob to be embedded in a specialist LLM prompt."""
+
+    path: str
+    mode: PayloadMode
+    content: str
+
+
+def _truncate_to_bytes(text: str, cap_bytes: int) -> tuple[str, bool]:
+    encoded = text.encode("utf-8", errors="replace")
+    if len(encoded) <= cap_bytes:
+        return text, False
+    cut = encoded[:cap_bytes].decode("utf-8", errors="ignore")
+    return cut + TRUNCATION_MARKER, True
+
+
+def prepare_file_payloads(
+    pr: PRContext,
+    working_dir: Path | str,
+    *,
+    per_file_cap_bytes: int = PER_FILE_CONTENT_CAP_BYTES,
+    total_threshold_bytes: int = TOTAL_CONTENT_THRESHOLD_BYTES,
+) -> list[FilePayload]:
+    """Return per-file LLM payloads with size caps + diff-only fallback applied.
+
+    For each terraform-relevant changed file we:
+
+    * Skip removed files (nothing to read on disk).
+    * Read the file content from ``working_dir`` and cap it at
+      ``per_file_cap_bytes`` (replacing the overflow with a truncation
+      marker).
+    * If the combined post-cap content exceeds ``total_threshold_bytes``, fall
+      back to sending only each file's PR patch (diff) instead of the full
+      content, so the LLM still gets context without blowing the token budget.
+    """
+
+    base = Path(working_dir)
+    candidates: list[ChangedFile] = [
+        f
+        for f in pr.changed_files
+        if f.status != "removed" and f.path.endswith(_TERRAFORM_SUFFIXES)
+    ]
+
+    full_payloads: list[FilePayload] = []
+    total_bytes = 0
+    for f in candidates:
+        target = base / f.path
+        if not target.is_file():
+            if f.patch:
+                full_payloads.append(FilePayload(path=f.path, mode="diff_only", content=f.patch))
+            continue
+        raw = target.read_text(encoding="utf-8", errors="replace")
+        content, truncated = _truncate_to_bytes(raw, per_file_cap_bytes)
+        mode: PayloadMode = "truncated" if truncated else "full"
+        full_payloads.append(FilePayload(path=f.path, mode=mode, content=content))
+        total_bytes += len(content.encode("utf-8"))
+
+    if total_bytes <= total_threshold_bytes:
+        return full_payloads
+
+    log.info(
+        "diff_only_fallback",
+        total_bytes=total_bytes,
+        threshold=total_threshold_bytes,
+        files=len(candidates),
+    )
+    diff_payloads: list[FilePayload] = []
+    for f in candidates:
+        if f.patch:
+            diff_payloads.append(FilePayload(path=f.path, mode="diff_only", content=f.patch))
+    return diff_payloads

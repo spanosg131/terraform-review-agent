@@ -32,6 +32,7 @@ GitHub PR event
 | Cost agent | Infracost (paid third-party, approved) |
 | Comment mode | Single sticky comment, edited each run |
 | Checkpointer | Off for MVP (one-shot CI run) |
+| Distribution | Prebuilt container on GHCR — reusable workflow runs the job inside `ghcr.io/spanosg131/terraform-review-agent`, no per-run installs |
 
 ---
 
@@ -88,12 +89,12 @@ Parallel branches write to disjoint fields — no reducer needed.
 - [x] Unit tests for state models and the sticky-comment upsert logic
 
 ### Phase 3 — Tools (one scanner per agent first)
-- [ ] `utils/tools.py` — `tfsec` wrapper (JSON output → structured)
-- [ ] `utils/tools.py` — `infracost diff` wrapper
-- [ ] `utils/tools.py` — `tflint` wrapper
-- [ ] Add `checkov` (security)
-- [ ] Add `terraform fmt -check` (style)
-- [ ] Token/size caps: per-file content cap, fallback to diff-only above threshold
+- [x] `utils/tools.py` — `tfsec` wrapper (JSON output → structured)
+- [x] `utils/tools.py` — `infracost diff` wrapper
+- [x] `utils/tools.py` — `tflint` wrapper
+- [x] Add `checkov` (security)
+- [x] Add `terraform fmt -check` (style)
+- [x] Token/size caps: per-file content cap, fallback to diff-only above threshold
 
 ### Phase 4 — Specialist nodes
 - [ ] `nodes.security_node` — calls tfsec + checkov, LLM → `Finding[]`
@@ -108,14 +109,22 @@ Parallel branches write to disjoint fields — no reducer needed.
 - [ ] Low-severity collapse behavior (always post; collapse `info`/`low` into `<details>`)
 - [ ] Unit tests for dedupe + renderer snapshots
 
-### Phase 6 — Reusable workflow
+### Phase 6 — Prebuilt container image
+- [ ] Extend `Dockerfile` to bundle pinned `terraform`, `tfsec`, `tflint`, `infracost` binaries + `checkov` (in the `.venv`)
+- [ ] Single image used for both local `docker compose` dev and CI — entrypoint runs `terraform_review_agent.entrypoint`
+- [ ] `.github/workflows/build-image.yml` — buildx + layer cache, pushes to GHCR on `main` and version tags
+- [ ] Tagging: `vX.Y.Z` per release, `v1` major float, `sha-<short>` per commit, `latest` for `main`
+- [ ] Smoke test inside the image that every binary resolves on `PATH`
+
+### Phase 7 — Reusable workflow
 - [ ] `.github/workflows/terraform-review.yml` (`workflow_call`, inputs/secrets above)
-- [ ] Install steps: uv + python 3.13, `aquasecurity/tfsec-action`, `terraform-linters/setup-tflint`, `infracost/actions/setup`, `hashicorp/setup-terraform`
+- [ ] Job uses `container: ghcr.io/spanosg131/terraform-review-agent:v1` — no per-run scanner installs
+- [ ] `actions/checkout@v4` with `fetch-depth: 0` so the base ref is available for `infracost diff`
 - [ ] Concurrency group + `cancel-in-progress`
 - [ ] `.github/workflows/example-caller.yml` (docs-only sample)
 - [ ] End-to-end run on a throwaway test PR
 
-### Phase 7 — Tests + polish
+### Phase 8 — Tests + polish
 - [ ] Integration test: compiled graph end-to-end with mocked LLM + recorded scanner output
 - [ ] `README.md` (consumer-facing: how to call the reusable workflow, required secrets, sample comment)
 - [ ] `make fmt lint type test` green on a clean checkout
@@ -125,7 +134,8 @@ Parallel branches write to disjoint fields — no reducer needed.
 ## Open considerations
 
 - **Token control** — large PRs will blow budgets. Per-file content cap, diff-only fallback above N KB, hard cap on changed-file count with a "review truncated" notice.
-- **Scanner install** — pinned action versions in the workflow keep the Python image lean.
+- **Scanner versions** — pinned in the `Dockerfile` (single source of truth). Bumping a scanner is a rebuild-image PR, not a workflow-file edit.
+- **Image size vs. pull time** — keep the image at `python:3.13-slim` base; ~400-600 MB target so warm pulls stay sub-10s on GitHub runners.
 - **Severity floor** — default: always post, collapse `info`/`low`. Revisit if comment spam becomes an issue.
 - **`fail-on-severity`** — default `none`; consumers opt in to gating CI.
 - **Checkpointer** — off for MVP; reconsider if we want to debug stuck runs.
