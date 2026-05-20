@@ -112,7 +112,7 @@ ENVIRONMENT=development               # development | staging | production
 
 `venv` · `install` · `fmt` · `lint` · `type` · `test` · `run` · `docker-build` · `docker-up` · `clean`
 
-All targets invoke `./.venv/bin/...` — never bare `python`. Use these instead of re-inventing commands.
+Python targets invoke `./.venv/bin/...` — never bare `python`. `run` is the exception: it executes inside the container (`docker compose run agent …`) so the bundled scanners are on `PATH`. Use these instead of re-inventing commands.
 
 ---
 

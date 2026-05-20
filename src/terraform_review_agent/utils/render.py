@@ -6,9 +6,10 @@ The aggregator collapses the three specialist branches into a single comment:
    identity, keeping the most severe instance.
 2. :func:`sort_findings` orders them by severity, then file/line, for a stable
    render (and stable test snapshots).
-3. :func:`render_comment` emits GitHub-flavored markdown: critical/high/medium
-   are shown inline as severity sections; ``low``/``info`` collapse into a
-   ``<details>`` block; a per-agent ``<details>`` breakdown follows.
+3. :func:`render_comment` emits GitHub-flavored markdown: each finding leads
+   with its message; critical/high/medium show inline as severity sections,
+   ``low``/``info`` collapse into a ``<details>`` block, and a compact per-agent
+   count line sits in the summary.
 
 The hidden sticky marker is intentionally *not* embedded here — the GitHub
 client owns it (see :meth:`GitHubClient.upsert_sticky_comment`), so the rendered
@@ -41,10 +42,24 @@ _SEVERITY_LABELS: dict[Severity, str] = {
     "info": "Info",
 }
 
+# Colored badges for quick visual triage (descending severity = red→white).
+_SEVERITY_EMOJI: dict[Severity, str] = {
+    "critical": "🔴",
+    "high": "🟠",
+    "medium": "🟡",
+    "low": "🔵",
+    "info": "⚪",
+}
+
 _AGENT_LABELS: dict[AgentName, str] = {
     "security": "Security",
     "cost": "Cost",
     "style": "Style",
+}
+_AGENT_EMOJI: dict[AgentName, str] = {
+    "security": "🔒",
+    "cost": "💰",
+    "style": "🎨",
 }
 _AGENT_ORDER: tuple[AgentName, ...] = ("security", "cost", "style")
 
@@ -135,31 +150,49 @@ def _file_ref(pr: PRContext, finding: Finding) -> str:
 
 
 def _render_finding(pr: PRContext, finding: Finding) -> list[str]:
-    """One bullet per finding, with an optional suggestion sub-bullet.
+    """One bullet per finding, leading with the message, plus a suggestion sub-bullet.
 
-    The line carries severity + rule + agent so it reads correctly in any
-    section (severity-grouped or agent-grouped). Untrusted fields (``rule``,
-    ``message``, ``suggestion``, ``file``) are sanitized; ``severity``/``agent``
-    are constrained literals.
+    Severity is conveyed by the enclosing section header, so it is not repeated
+    on the bullet; the message comes first (it's what a reviewer scans for),
+    followed by the location link and the ``rule · agent`` provenance. Untrusted
+    fields (``rule``, ``message``, ``suggestion``, ``file``) are sanitized;
+    ``agent`` is a constrained literal.
     """
 
     lines = [
-        f"- `{finding.severity}` · `{_code(finding.rule)}` · {finding.agent} — "
-        f"{_inline(finding.message)} ({_file_ref(pr, finding)})"
+        f"- {_SEVERITY_EMOJI[finding.severity]} **{_inline(finding.message)}** "
+        f"— {_file_ref(pr, finding)} · `{_code(finding.rule)}` · {finding.agent}"
     ]
     if finding.suggestion:
         lines.append(f"  - _Suggestion:_ {_inline(finding.suggestion)}")
     return lines
 
 
-def _summary_line(findings: list[Finding]) -> str:
-    counts = Counter(f.severity for f in findings)
-    parts = [
-        f"{counts[sev]} {_SEVERITY_LABELS[sev].lower()}" for sev in SEVERITY_ORDER if counts[sev]
+def _summary_lines(findings: list[Finding]) -> list[str]:
+    """Headline counts: total + distinct files + per-severity, then per-agent."""
+
+    sev_counts = Counter(f.severity for f in findings)
+    sev_parts = [
+        f"{sev_counts[sev]} {_SEVERITY_LABELS[sev].lower()}"
+        for sev in SEVERITY_ORDER
+        if sev_counts[sev]
     ]
     total = len(findings)
     noun = "finding" if total == 1 else "findings"
-    return f"**{total} {noun}** — {', '.join(parts)}"
+    n_files = len({f.file for f in findings})
+    file_noun = "file" if n_files == 1 else "files"
+    lines = [f"**{total} {noun}** in {n_files} {file_noun} — {', '.join(sev_parts)}"]
+
+    agent_counts = Counter(f.agent for f in findings)
+    agent_parts = [
+        f"{_AGENT_EMOJI[agent]} {_AGENT_LABELS[agent]} {agent_counts[agent]}"
+        for agent in _AGENT_ORDER
+        if agent_counts[agent]
+    ]
+    if agent_parts:
+        lines.append("")
+        lines.append(f"_By agent:_ {' · '.join(agent_parts)}")
+    return lines
 
 
 def _severity_sections(pr: PRContext, findings: list[Finding]) -> list[str]:
@@ -168,7 +201,7 @@ def _severity_sections(pr: PRContext, findings: list[Finding]) -> list[str]:
         group = [f for f in findings if f.severity == sev]
         if not group:
             continue
-        parts.append(f"### {_SEVERITY_LABELS[sev]} ({len(group)})")
+        parts.append(f"### {_SEVERITY_EMOJI[sev]} {_SEVERITY_LABELS[sev]} ({len(group)})")
         for finding in group:
             parts.extend(_render_finding(pr, finding))
         parts.append("")
@@ -184,29 +217,12 @@ def _collapsed_section(pr: PRContext, findings: list[Finding]) -> list[str]:
         sub = [f for f in group if f.severity == sev]
         if not sub:
             continue
-        parts.append(f"#### {_SEVERITY_LABELS[sev]} ({len(sub)})")
+        parts.append(f"#### {_SEVERITY_EMOJI[sev]} {_SEVERITY_LABELS[sev]} ({len(sub)})")
         for finding in sub:
             parts.extend(_render_finding(pr, finding))
         parts.append("")
     parts.append("</details>")
     parts.append("")
-    return parts
-
-
-def _agent_sections(pr: PRContext, findings: list[Finding]) -> list[str]:
-    parts: list[str] = []
-    for agent in _AGENT_ORDER:
-        group = [f for f in findings if f.agent == agent]
-        if not group:
-            continue
-        parts.append("<details>")
-        parts.append(f"<summary>{_AGENT_LABELS[agent]} ({len(group)})</summary>")
-        parts.append("")
-        for finding in group:
-            parts.extend(_render_finding(pr, finding))
-        parts.append("")
-        parts.append("</details>")
-        parts.append("")
     return parts
 
 
@@ -220,15 +236,9 @@ def render_comment(findings: list[Finding], pr: PRContext) -> str:
         parts.append(_NO_FINDINGS)
         return "\n".join(parts) + "\n"
 
-    parts.append(_summary_line(ordered))
+    parts.extend(_summary_lines(ordered))
     parts.append("")
     parts.extend(_severity_sections(pr, ordered))
     parts.extend(_collapsed_section(pr, ordered))
-
-    agent_blocks = _agent_sections(pr, ordered)
-    if agent_blocks:
-        parts.append("### Findings by agent")
-        parts.append("")
-        parts.extend(agent_blocks)
 
     return "\n".join(parts).rstrip() + "\n"

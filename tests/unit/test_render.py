@@ -149,9 +149,9 @@ def test_render_visible_severities_are_top_level_sections() -> None:
         _pr(),
     )
 
-    assert "### Critical (1)" in md
-    assert "### High (1)" in md
-    assert "### Medium (1)" in md
+    assert "### 🔴 Critical (1)" in md
+    assert "### 🟠 High (1)" in md
+    assert "### 🟡 Medium (1)" in md
     # Visible severities are not buried in a collapsed block.
     assert "<summary>Low &amp; info" not in md
 
@@ -167,29 +167,52 @@ def test_render_collapses_low_and_info_into_details() -> None:
 
     assert "<details>" in md
     assert "<summary>Low &amp; info (2)</summary>" in md
-    assert "#### Low (1)" in md
-    assert "#### Info (1)" in md
+    assert "#### 🔵 Low (1)" in md
+    assert "#### ⚪ Info (1)" in md
     # Collapsed severities never appear as top-level (`### `) sections — they
     # only show up as `#### ` sub-headers inside the details block.
     lines = md.splitlines()
-    assert "### Low (1)" not in lines
-    assert "### Info (1)" not in lines
+    assert "### 🔵 Low (1)" not in lines
+    assert "### ⚪ Info (1)" not in lines
 
 
-def test_render_per_agent_details_blocks() -> None:
+def test_render_summarizes_counts_by_agent_without_duplicating_findings() -> None:
     md = render_comment(
         [
-            _f(agent="security", rule="s"),
-            _f(agent="cost", rule="infracost:resource-delta"),
-            _f(agent="style", rule="tflint:z"),
+            _f(agent="security", severity="high", rule="s"),
+            _f(agent="cost", severity="medium", rule="infracost:resource-delta"),
+            _f(agent="style", severity="low", rule="tflint:z"),
         ],
         _pr(),
     )
 
-    assert "### Findings by agent" in md
-    assert "<summary>Security (1)</summary>" in md
-    assert "<summary>Cost (1)</summary>" in md
-    assert "<summary>Style (1)</summary>" in md
+    assert "_By agent:_ 🔒 Security 1 · 💰 Cost 1 · 🎨 Style 1" in md
+    # The old per-agent <details> dump (which re-printed every finding) is gone.
+    assert "### Findings by agent" not in md
+    assert "<summary>Security" not in md
+
+
+def test_render_summary_counts_files_and_findings() -> None:
+    md = render_comment(
+        [
+            _f(severity="high", file="a.tf", line=1, rule="r1"),
+            _f(severity="high", file="a.tf", line=2, rule="r2"),
+            _f(severity="medium", file="b.tf", line=1, rule="r3"),
+        ],
+        _pr(),
+    )
+
+    assert "**3 findings** in 2 files — 2 high, 1 medium" in md
+
+
+def test_render_finding_leads_with_message_not_severity() -> None:
+    md = render_comment([_f(severity="high", message="Public bucket", rule="tfsec:x")], _pr())
+
+    # The badge + bolded message lead; rule/agent are trailing provenance, and
+    # the textual severity token is not repeated (the section header carries it).
+    assert "- 🟠 **Public bucket** — " in md
+    assert "· `tfsec:x` · security" in md
+    assert "- `high` ·" not in md
 
 
 def test_render_file_line_link_pinned_to_head_sha() -> None:
@@ -292,32 +315,23 @@ def test_render_full_comment_snapshot() -> None:
             [
                 "## Terraform Review",
                 "",
-                "**2 findings** — 1 critical, 1 info",
+                "**2 findings** in 2 files — 1 critical, 1 info",
                 "",
-                "### Critical (1)",
-                "- `critical` · `tfsec:aws-s3-no-public` · security — Public S3 bucket "
-                "([`main.tf:10`](https://github.com/acme/example/blob/deadbeef/main.tf#L10))",
+                "_By agent:_ 🔒 Security 2",
+                "",
+                "### 🔴 Critical (1)",
+                "- 🔴 **Public S3 bucket** — "
+                "[`main.tf:10`](https://github.com/acme/example/blob/deadbeef/main.tf#L10) "
+                "· `tfsec:aws-s3-no-public` · security",
                 "  - _Suggestion:_ Set acl=private",
                 "",
                 "<details>",
                 "<summary>Low &amp; info (1)</summary>",
                 "",
-                "#### Info (1)",
-                "- `info` · `security:llm-note` · security — Consider tagging "
-                "([`variables.tf`](https://github.com/acme/example/blob/deadbeef/variables.tf))",
-                "",
-                "</details>",
-                "",
-                "### Findings by agent",
-                "",
-                "<details>",
-                "<summary>Security (2)</summary>",
-                "",
-                "- `critical` · `tfsec:aws-s3-no-public` · security — Public S3 bucket "
-                "([`main.tf:10`](https://github.com/acme/example/blob/deadbeef/main.tf#L10))",
-                "  - _Suggestion:_ Set acl=private",
-                "- `info` · `security:llm-note` · security — Consider tagging "
-                "([`variables.tf`](https://github.com/acme/example/blob/deadbeef/variables.tf))",
+                "#### ⚪ Info (1)",
+                "- ⚪ **Consider tagging** — "
+                "[`variables.tf`](https://github.com/acme/example/blob/deadbeef/variables.tf) "
+                "· `security:llm-note` · security",
                 "",
                 "</details>",
             ]

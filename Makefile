@@ -1,6 +1,5 @@
-.PHONY: venv install lock lock-check fmt lint type test run docker-build docker-up clean
+.PHONY: venv install lock lock-check fmt lint type test run review-local docker-build docker-up clean
 
-PY      := ./.venv/bin/python
 PIP     := ./.venv/bin/pip
 UV      := ./.venv/bin/uv
 RUFF    := ./.venv/bin/ruff
@@ -34,8 +33,21 @@ type:
 test:
 	$(PYTEST) -q
 
+# Run a review locally inside the container, which bundles every scanner
+# (terraform/tfsec/tflint/infracost/checkov) — the host .venv does not. Provide
+# PR coordinates + keys via .env (GITHUB_REPOSITORY, GITHUB_PR_NUMBER, *_API_KEY)
+# or ad-hoc, e.g. `make run ARGS="--repository owner/repo --pr-number 1"`.
+# Builds the image on first use; rerun `make docker-build` after dependency bumps
+# (src is bind-mounted, so code changes need no rebuild).
 run:
-	$(PY) -m terraform_review_agent.entrypoint
+	docker compose run --rm agent python -m terraform_review_agent.entrypoint $(ARGS)
+
+# Full local review of a real PR, mirroring CI: clones the repo, checks out the
+# PR, builds the infracost baseline in /tmp, and posts the comment. Needs
+# GITHUB_TOKEN (+ optional INFRACOST_API_KEY) in .env. Nothing touches ./data.
+#   make review-local REPO=owner/repo PR=42
+review-local:
+	docker compose run --rm -e REPO="$(REPO)" -e PR="$(PR)" agent sh /app/scripts/review_local.sh
 
 docker-build:
 	docker compose build
