@@ -106,10 +106,12 @@ class Finding(BaseModel):
 
 
 class LLMFinding(BaseModel):
-    """A finding as emitted by a specialist LLM (no ``agent`` field).
+    """A finding the LLM discovered that no scanner reported (no ``agent`` field).
 
-    The owning node knows which agent it is and stamps that label when mapping
-    these to :class:`Finding`, so the model can't mislabel the source.
+    Only used when ``settings.enable_llm_findings`` is true. The owning node
+    stamps the agent label when mapping these to :class:`Finding`, so the model
+    can't mislabel the source. Scanner-reported findings never flow through this
+    model — those keep their deterministic severity/file/line/rule.
     """
 
     severity: Severity
@@ -120,10 +122,30 @@ class LLMFinding(BaseModel):
     suggestion: str | None = None
 
 
-class SpecialistReview(BaseModel):
-    """Structured-output container bound to a specialist LLM call."""
+class FindingAnnotation(BaseModel):
+    """A wording-only refinement the LLM applies to one scanner finding.
 
-    findings: list[LLMFinding] = Field(default_factory=list)
+    Keyed by the ``id`` the node assigned when listing the scanner findings.
+    The LLM may rewrite ``message``/``suggestion`` for clarity but cannot change
+    a finding's severity, file, line, or rule — those stay as the scanner
+    reported them, which keeps the finding *set* identical across runs.
+    """
+
+    id: int
+    message: str
+    suggestion: str | None = None
+
+
+class SpecialistAnnotations(BaseModel):
+    """Structured-output container for a specialist LLM call.
+
+    ``annotations`` reword the scanner findings (deterministic set); ``discovered``
+    holds extra LLM-only findings and is ignored unless
+    ``settings.enable_llm_findings`` is set.
+    """
+
+    annotations: list[FindingAnnotation] = Field(default_factory=list)
+    discovered: list[LLMFinding] = Field(default_factory=list)
 
 
 class CostSummary(BaseModel):

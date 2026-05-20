@@ -369,9 +369,7 @@ def test_run_tflint_tolerates_nonzero_exit_with_issues(
     assert run_tflint.invoke({"working_dir": str(tmp_path)}) == []
 
 
-def _record_subprocess(
-    monkeypatch: pytest.MonkeyPatch, *, binary_path: str
-) -> list[list[str]]:
+def _record_subprocess(monkeypatch: pytest.MonkeyPatch, *, binary_path: str) -> list[list[str]]:
     """Patch which + subprocess.run, recording every command (not just the last)."""
 
     calls: list[list[str]] = []

@@ -7,10 +7,15 @@ Each node:
    :func:`~terraform_review_agent.utils.tools.prepare_file_payloads`.
 2. Runs its OSS scanners against the workspace, tolerating a missing scanner
    binary by logging and continuing.
-3. Hands the scanner findings + file contents to the configured LLM, which
-   returns a normalized, de-duplicated :class:`SpecialistReview`.
+3. Hands the scanner findings (the canonical, deterministic set) + file contents
+   to the configured LLM, which may only *reword* them via
+   :class:`SpecialistAnnotations` — severity/file/line/rule and the finding set
+   itself are owned by the scanners, so they stay identical across runs.
 4. Stamps the owning agent name onto each finding and writes its disjoint state
    field (``security`` / ``cost`` / ``style``).
+
+Speculative LLM-discovered findings (no scanner reported them) are opt-in via
+``settings.enable_llm_findings`` and never emitted for cost.
 
 A node short-circuits before touching scanners or the LLM when the PR changed no
 Terraform files (for cost, also when the infracost key is unset), which keeps
@@ -35,7 +40,7 @@ from terraform_review_agent.utils.state import (
     CostReport,
     Finding,
     ReviewState,
-    SpecialistReview,
+    SpecialistAnnotations,
 )
 from terraform_review_agent.utils.tools import (
     FilePayload,
@@ -76,32 +81,98 @@ def _filter_to_changed(findings: list[Finding], changed_paths: set[str]) -> list
     return [f for f in findings if f.file in changed_paths]
 
 
-def _review_with_llm(
+def _prefer_refined(refined: str | None, original: str | None) -> str | None:
+    """Use the LLM's text only when it's non-blank; otherwise keep the scanner's.
+
+    The annotation step is wording-only: a blank/whitespace ``message`` or
+    ``suggestion`` from the model means "nothing to add", not "erase the
+    scanner's remediation". Only a real, non-empty string overrides the
+    deterministic scanner text.
+    """
+
+    if refined is not None and refined.strip():
+        return refined
+    return original
+
+
+def _namespaced_llm_rule(agent: AgentName, rule: str) -> str:
+    """Force a discovered finding's rule into the ``{agent}:llm-`` namespace.
+
+    The prompt asks for this prefix, but the model isn't bound to it. Enforcing
+    it in code stops a hallucinated finding from masquerading as scanner output
+    (e.g. ``tfsec:...``) or colliding with a real scanner finding's
+    ``(file, rule, line)`` dedupe key.
+    """
+
+    prefix = f"{agent}:llm-"
+    if rule.startswith(prefix):
+        return rule
+    slug = rule.split(":")[-1].removeprefix("llm-").strip() or "finding"
+    return f"{prefix}{slug}"
+
+
+def _annotate_with_llm(
     agent: AgentName,
-    system_prompt: str,
     raw_findings: list[Finding],
     payloads: list[FilePayload],
 ) -> list[Finding]:
-    """Refine scanner output with the LLM and stamp the owning ``agent`` name."""
+    """Reword scanner findings with the LLM, keeping the finding set deterministic.
 
-    human = prompts.build_specialist_input(raw_findings, payloads)
-    structured = get_llm().with_structured_output(SpecialistReview)
-    result = structured.invoke([SystemMessage(content=system_prompt), HumanMessage(content=human)])
+    The scanner findings are canonical: their severity/file/line/rule are
+    preserved verbatim and every one is returned. The LLM may only rewrite
+    ``message``/``suggestion`` (matched back by the ``id`` we assign here), so
+    the *set* of findings is identical run-to-run — only the wording varies.
+    Speculative LLM-discovered findings are appended only when
+    ``settings.enable_llm_findings`` is set (and never for cost).
+    """
+
+    canonical = [f.model_copy(update={"agent": agent}) for f in raw_findings]
+    allow_discovery = settings.enable_llm_findings and agent != "cost"
+    # Nothing for the LLM to do: no findings to reword and discovery is off (or
+    # on but with no file content to discover from).
+    if not canonical and (not allow_discovery or not payloads):
+        return canonical
+
+    system = prompts.specialist_system_prompt(agent, allow_discovery)
+    human = prompts.build_specialist_input(canonical, payloads)
+    structured = get_llm().with_structured_output(SpecialistAnnotations)
+    result = structured.invoke([SystemMessage(content=system), HumanMessage(content=human)])
     review = (
-        result if isinstance(result, SpecialistReview) else SpecialistReview.model_validate(result)
+        result
+        if isinstance(result, SpecialistAnnotations)
+        else SpecialistAnnotations.model_validate(result)
     )
-    return [
-        Finding(
-            agent=agent,
-            severity=item.severity,
-            file=item.file,
-            line=item.line,
-            rule=item.rule,
-            message=item.message,
-            suggestion=item.suggestion,
+
+    by_id = {a.id: a for a in review.annotations}
+    findings: list[Finding] = []
+    for idx, finding in enumerate(canonical):
+        annotation = by_id.get(idx)
+        if annotation is None:
+            findings.append(finding)
+            continue
+        findings.append(
+            finding.model_copy(
+                update={
+                    "message": _prefer_refined(annotation.message, finding.message),
+                    "suggestion": _prefer_refined(annotation.suggestion, finding.suggestion),
+                }
+            )
         )
-        for item in review.findings
-    ]
+
+    if allow_discovery:
+        findings.extend(
+            Finding(
+                agent=agent,
+                severity=item.severity,
+                file=item.file,
+                line=item.line,
+                rule=_namespaced_llm_rule(agent, item.rule),
+                message=item.message,
+                suggestion=item.suggestion,
+            )
+            for item in review.discovered
+        )
+    return findings
 
 
 def security_node(state: ReviewState) -> dict[str, list[Finding]]:
@@ -120,7 +191,7 @@ def security_node(state: ReviewState) -> dict[str, list[Finding]]:
     )
     if not (raw or payloads):
         return {"security": []}
-    findings = _review_with_llm("security", prompts.SECURITY_SYSTEM_PROMPT, raw, payloads)
+    findings = _annotate_with_llm("security", raw, payloads)
     return {"security": _filter_to_changed(findings, changed)}
 
 
@@ -169,11 +240,7 @@ def cost_node(state: ReviewState) -> dict[str, object]:
         delta_monthly=summary.delta_monthly if summary else None,
         usage_file_synced=usage_file is not None,
     )
-    findings = (
-        _review_with_llm("cost", prompts.COST_SYSTEM_PROMPT, report.findings, payloads)
-        if report.findings
-        else []
-    )
+    findings = _annotate_with_llm("cost", report.findings, payloads) if report.findings else []
     return {"cost": findings, "cost_summary": summary}
 
 
@@ -195,7 +262,7 @@ def style_node(state: ReviewState) -> dict[str, list[Finding]]:
     )
     if not (raw or payloads):
         return {"style": []}
-    findings = _review_with_llm("style", prompts.STYLE_SYSTEM_PROMPT, raw, payloads)
+    findings = _annotate_with_llm("style", raw, payloads)
     return {"style": _filter_to_changed(findings, changed)}
 
 

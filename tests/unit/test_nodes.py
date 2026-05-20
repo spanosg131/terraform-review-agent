@@ -3,7 +3,12 @@
 Both sides of each node are stubbed: scanner ``@tool`` objects are replaced with
 fakes returning canned ``Finding``/raising ``ScannerError``, and ``get_llm`` is
 replaced with a fake chat model whose structured-output runnable returns a
-canned :class:`SpecialistReview`. No subprocesses or network calls run.
+canned :class:`SpecialistAnnotations`. No subprocesses or network calls run.
+
+The contract under test: scanner findings are canonical — their severity, file,
+line, and rule survive verbatim and the finding *set* is fixed by the scanners.
+The LLM may only reword ``message``/``suggestion`` (matched back by ``id``).
+Speculative LLM-discovered findings are gated on ``settings.enable_llm_findings``.
 """
 
 from __future__ import annotations
@@ -20,10 +25,11 @@ from terraform_review_agent.utils.state import (
     CostReport,
     CostSummary,
     Finding,
+    FindingAnnotation,
     LLMFinding,
     PRContext,
     ReviewState,
-    SpecialistReview,
+    SpecialistAnnotations,
 )
 from terraform_review_agent.utils.tools import ScannerError
 
@@ -47,18 +53,18 @@ class _FakeTool:
 
 
 class _FakeStructured:
-    def __init__(self, review: SpecialistReview) -> None:
-        self._review = review
+    def __init__(self, result: SpecialistAnnotations) -> None:
+        self._result = result
         self.messages: list[Any] = []
 
-    def invoke(self, messages: Any) -> SpecialistReview:
+    def invoke(self, messages: Any) -> SpecialistAnnotations:
         self.messages = messages
-        return self._review
+        return self._result
 
 
 class _FakeLLM:
-    def __init__(self, review: SpecialistReview) -> None:
-        self.structured = _FakeStructured(review)
+    def __init__(self, result: SpecialistAnnotations) -> None:
+        self.structured = _FakeStructured(result)
         self.schema: Any = None
 
     def with_structured_output(self, schema: Any) -> _FakeStructured:
@@ -66,8 +72,8 @@ class _FakeLLM:
         return self.structured
 
 
-def _patch_llm(monkeypatch: pytest.MonkeyPatch, review: SpecialistReview) -> _FakeLLM:
-    llm = _FakeLLM(review)
+def _patch_llm(monkeypatch: pytest.MonkeyPatch, result: SpecialistAnnotations) -> _FakeLLM:
+    llm = _FakeLLM(result)
     monkeypatch.setattr(nodes, "get_llm", lambda *a, **k: llm)
     return llm
 
@@ -128,15 +134,10 @@ def test_security_node_runs_scanners_then_llm(
     monkeypatch.setattr(nodes, "run_checkov", checkov)
     llm = _patch_llm(
         monkeypatch,
-        SpecialistReview(
-            findings=[
-                LLMFinding(
-                    severity="high",
-                    file="main.tf",
-                    line=1,
-                    rule="tfsec:x",
-                    message="Public S3 bucket",
-                    suggestion="Add a bucket policy",
+        SpecialistAnnotations(
+            annotations=[
+                FindingAnnotation(
+                    id=0, message="Public S3 bucket", suggestion="Add a bucket policy"
                 )
             ]
         ),
@@ -150,13 +151,88 @@ def test_security_node_runs_scanners_then_llm(
     assert len(findings) == 1
     f = findings[0]
     assert f.agent == "security"
+    # Scanner owns severity/rule; LLM only reworded the message/suggestion.
+    assert f.severity == "high"
     assert f.rule == "tfsec:x"
     assert f.message == "Public S3 bucket"
-    assert llm.schema is SpecialistReview
+    assert f.suggestion == "Add a bucket policy"
+    assert llm.schema is SpecialistAnnotations
     # The raw scanner finding and the file content are both handed to the LLM.
     human = llm.structured.messages[1].content
     assert "tfsec:x" in human
     assert "aws_s3_bucket" in human
+
+
+def test_security_node_keeps_scanner_text_when_unannotated(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A finding the LLM returns no annotation for keeps the scanner's own
+    # message/suggestion verbatim — it is never dropped.
+    (tmp_path / "main.tf").write_text("resource {}\n")
+    state = _state(tmp_path, files=[ChangedFile(path="main.tf")])
+
+    monkeypatch.setattr(
+        nodes,
+        "run_tfsec",
+        _FakeTool(
+            [
+                Finding(
+                    agent="security",
+                    severity="high",
+                    file="main.tf",
+                    rule="tfsec:x",
+                    message="scanner message",
+                    suggestion="scanner fix",
+                )
+            ]
+        ),
+    )
+    monkeypatch.setattr(nodes, "run_checkov", _FakeTool([]))
+    _patch_llm(monkeypatch, SpecialistAnnotations(annotations=[]))
+
+    out = nodes.security_node(state)
+
+    f = out["security"][0]
+    assert f.message == "scanner message"
+    assert f.suggestion == "scanner fix"
+    assert f.severity == "high"
+
+
+def test_security_node_blank_annotation_preserves_scanner_text(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A blank/whitespace message or suggestion from the LLM means "nothing to
+    # add" — it must not erase the scanner's own message/remediation.
+    (tmp_path / "main.tf").write_text("resource {}\n")
+    state = _state(tmp_path, files=[ChangedFile(path="main.tf")])
+
+    monkeypatch.setattr(
+        nodes,
+        "run_tfsec",
+        _FakeTool(
+            [
+                Finding(
+                    agent="security",
+                    severity="high",
+                    file="main.tf",
+                    rule="tfsec:x",
+                    message="scanner message",
+                    suggestion="scanner remediation",
+                )
+            ]
+        ),
+    )
+    monkeypatch.setattr(nodes, "run_checkov", _FakeTool([]))
+    _patch_llm(
+        monkeypatch,
+        SpecialistAnnotations(annotations=[FindingAnnotation(id=0, message="   ", suggestion="")]),
+    )
+
+    out = nodes.security_node(state)
+
+    f = out["security"][0]
+    assert f.message == "scanner message"
+    assert f.suggestion == "scanner remediation"
 
 
 def test_security_node_filters_unchanged_file_findings_from_llm_input(
@@ -185,11 +261,7 @@ def test_security_node_filters_unchanged_file_findings_from_llm_input(
     monkeypatch.setattr(nodes, "run_checkov", _FakeTool([]))
     llm = _patch_llm(
         monkeypatch,
-        SpecialistReview(
-            findings=[
-                LLMFinding(severity="high", file="main.tf", rule="tfsec:changed", message="ok")
-            ]
-        ),
+        SpecialistAnnotations(annotations=[FindingAnnotation(id=0, message="ok")]),
     )
 
     out = nodes.security_node(state)
@@ -201,20 +273,37 @@ def test_security_node_filters_unchanged_file_findings_from_llm_input(
     assert [f.rule for f in out["security"]] == ["tfsec:changed"]
 
 
-def test_security_node_drops_llm_findings_outside_changed_files(
+def test_security_node_discovery_off_ignores_llm_findings(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    # Even if the LLM emits a finding for a file the PR did not touch, the
-    # post-filter removes it from the output.
+    # With discovery disabled (default) the scanners reported nothing, so the
+    # LLM is never consulted and no speculative findings leak through.
     (tmp_path / "main.tf").write_text("resource {}\n")
+    monkeypatch.setattr(nodes.settings, "enable_llm_findings", False)
+    _forbid_llm(monkeypatch)
+    state = _state(tmp_path, files=[ChangedFile(path="main.tf")])
+
+    monkeypatch.setattr(nodes, "run_tfsec", _FakeTool([]))
+    monkeypatch.setattr(nodes, "run_checkov", _FakeTool([]))
+
+    assert nodes.security_node(state) == {"security": []}
+
+
+def test_security_node_discovery_on_post_filters_to_changed_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # With discovery enabled the LLM may add `discovered` findings; any that
+    # land outside the changed files are stripped by the post-filter.
+    (tmp_path / "main.tf").write_text("resource {}\n")
+    monkeypatch.setattr(nodes.settings, "enable_llm_findings", True)
     state = _state(tmp_path, files=[ChangedFile(path="main.tf")])
 
     monkeypatch.setattr(nodes, "run_tfsec", _FakeTool([]))
     monkeypatch.setattr(nodes, "run_checkov", _FakeTool([]))
     _patch_llm(
         monkeypatch,
-        SpecialistReview(
-            findings=[
+        SpecialistAnnotations(
+            discovered=[
                 LLMFinding(severity="high", file="main.tf", rule="security:llm-1", message="real"),
                 LLMFinding(
                     severity="high", file="other/untouched.tf", rule="security:llm-2", message="x"
@@ -226,6 +315,40 @@ def test_security_node_drops_llm_findings_outside_changed_files(
     out = nodes.security_node(state)
 
     assert [f.file for f in out["security"]] == ["main.tf"]
+    assert [f.rule for f in out["security"]] == ["security:llm-1"]
+
+
+def test_security_node_discovery_namespaces_rule_ids(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A discovered finding cannot masquerade as scanner output: its rule is
+    # coerced into the `security:llm-` namespace regardless of what the LLM
+    # returned (here a scanner-looking id and a bare slug).
+    (tmp_path / "main.tf").write_text("resource {}\n")
+    monkeypatch.setattr(nodes.settings, "enable_llm_findings", True)
+    state = _state(tmp_path, files=[ChangedFile(path="main.tf")])
+
+    monkeypatch.setattr(nodes, "run_tfsec", _FakeTool([]))
+    monkeypatch.setattr(nodes, "run_checkov", _FakeTool([]))
+    _patch_llm(
+        monkeypatch,
+        SpecialistAnnotations(
+            discovered=[
+                LLMFinding(severity="high", file="main.tf", rule="tfsec:fake", message="spoof"),
+                LLMFinding(severity="low", file="main.tf", rule="public-bucket", message="bare"),
+                LLMFinding(
+                    severity="low", file="main.tf", rule="security:llm-ok", message="already ok"
+                ),
+            ]
+        ),
+    )
+
+    out = nodes.security_node(state)
+
+    rules = [f.rule for f in out["security"]]
+    assert rules == ["security:llm-fake", "security:llm-public-bucket", "security:llm-ok"]
+    # Nothing leaked through with a scanner namespace.
+    assert not any(r.startswith(("tfsec:", "checkov:")) for r in rules)
 
 
 def test_security_node_skips_when_no_terraform_changes(
@@ -259,9 +382,7 @@ def test_security_node_runs_scanners_when_payloads_empty(
     monkeypatch.setattr(nodes, "run_checkov", _FakeTool([]))
     _patch_llm(
         monkeypatch,
-        SpecialistReview(
-            findings=[LLMFinding(severity="high", file="main.tf", rule="tfsec:x", message="ok")]
-        ),
+        SpecialistAnnotations(annotations=[FindingAnnotation(id=0, message="ok")]),
     )
 
     out = nodes.security_node(state)
@@ -283,9 +404,7 @@ def test_security_node_tolerates_missing_scanner_binary(
     monkeypatch.setattr(nodes, "run_checkov", checkov)
     _patch_llm(
         monkeypatch,
-        SpecialistReview(
-            findings=[LLMFinding(severity="low", file="main.tf", rule="checkov:y", message="ok")]
-        ),
+        SpecialistAnnotations(annotations=[FindingAnnotation(id=0, message="ok")]),
     )
 
     out = nodes.security_node(state)
@@ -338,16 +457,7 @@ def test_cost_node_runs_infracost_when_payloads_empty(
     monkeypatch.setattr(nodes, "run_infracost_diff", infracost)
     _patch_llm(
         monkeypatch,
-        SpecialistReview(
-            findings=[
-                LLMFinding(
-                    severity="medium",
-                    file="main.tf",
-                    rule="infracost:resource-delta",
-                    message="+$25/mo",
-                )
-            ]
-        ),
+        SpecialistAnnotations(annotations=[FindingAnnotation(id=0, message="+$25/mo")]),
     )
 
     out = nodes.cost_node(state)
@@ -380,12 +490,10 @@ def test_cost_node_runs_infracost_then_llm(monkeypatch: pytest.MonkeyPatch, tmp_
     monkeypatch.setattr(nodes, "run_infracost_diff", infracost)
     _patch_llm(
         monkeypatch,
-        SpecialistReview(
-            findings=[
-                LLMFinding(
-                    severity="medium",
-                    file="main.tf",
-                    rule="infracost:resource-delta",
+        SpecialistAnnotations(
+            annotations=[
+                FindingAnnotation(
+                    id=0,
                     message="+$25/mo for aws_instance.w",
                     suggestion="Use a smaller instance type",
                 )
@@ -403,6 +511,8 @@ def test_cost_node_runs_infracost_then_llm(monkeypatch: pytest.MonkeyPatch, tmp_
         }
     ]
     assert [f.agent for f in out["cost"]] == ["cost"]
+    # Scanner owns the severity; the LLM only reworded the message.
+    assert out["cost"][0].severity == "medium"
     assert out["cost"][0].message.startswith("+$25")
     # The absolute total + delta are surfaced via cost_summary.
     assert out["cost_summary"] == CostSummary(total_monthly=26.0, delta_monthly=25.0)
@@ -438,16 +548,7 @@ def test_cost_node_auto_generates_baseline_when_unset(
     monkeypatch.setattr(nodes, "run_infracost_diff", infracost)
     _patch_llm(
         monkeypatch,
-        SpecialistReview(
-            findings=[
-                LLMFinding(
-                    severity="medium",
-                    file="main.tf",
-                    rule="infracost:resource-delta",
-                    message="+$5/mo",
-                )
-            ]
-        ),
+        SpecialistAnnotations(annotations=[FindingAnnotation(id=0, message="+$5/mo")]),
     )
 
     out = nodes.cost_node(state)
@@ -521,6 +622,48 @@ def test_cost_node_reports_summary_with_no_resource_change(
     assert out["cost_summary"] == summary
 
 
+def test_cost_node_discovery_flag_never_invents_cost_findings(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Even with enable_llm_findings on, cost has no source of truth for invented
+    # dollar amounts, so `discovered` is ignored for the cost agent.
+    monkeypatch.setattr(nodes.settings, "infracost_api_key", SecretStr("k"))
+    monkeypatch.setattr(nodes.settings, "enable_llm_findings", True)
+    (tmp_path / "main.tf").write_text('resource "aws_instance" "w" {}\n')
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text("{}")
+    state = _state(tmp_path, files=[ChangedFile(path="main.tf")], baseline=str(baseline))
+
+    infracost = _FakeTool(
+        CostReport(
+            findings=[
+                Finding(
+                    agent="cost",
+                    severity="medium",
+                    file="main.tf",
+                    rule="infracost:resource-delta",
+                    message="raw",
+                )
+            ],
+            summary=CostSummary(total_monthly=26.0, delta_monthly=25.0),
+        )
+    )
+    monkeypatch.setattr(nodes, "run_infracost_diff", infracost)
+    _patch_llm(
+        monkeypatch,
+        SpecialistAnnotations(
+            annotations=[FindingAnnotation(id=0, message="+$25/mo")],
+            discovered=[
+                LLMFinding(severity="high", file="main.tf", rule="cost:llm-1", message="invented")
+            ],
+        ),
+    )
+
+    out = nodes.cost_node(state)
+
+    assert [f.rule for f in out["cost"]] == ["infracost:resource-delta"]
+
+
 def test_cost_node_tolerates_infracost_error(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -553,20 +696,16 @@ def test_style_node_runs_scanners_then_llm(monkeypatch: pytest.MonkeyPatch, tmp_
     monkeypatch.setattr(nodes, "run_terraform_fmt", fmt)
     _patch_llm(
         monkeypatch,
-        SpecialistReview(
-            findings=[
-                LLMFinding(
-                    severity="low", file="main.tf", line=1, rule="tflint:z", message="Add type"
-                )
-            ]
-        ),
+        SpecialistAnnotations(annotations=[FindingAnnotation(id=0, message="Add type")]),
     )
 
     out = nodes.style_node(state)
 
     assert tflint.calls and fmt.calls
     assert [f.agent for f in out["style"]] == ["style"]
-    assert out["style"][0].severity == "low"
+    # Scanner owns the severity; the LLM cannot downgrade it.
+    assert out["style"][0].severity == "medium"
+    assert out["style"][0].message == "Add type"
 
 
 def test_style_node_skips_when_no_terraform_changes(
@@ -597,9 +736,7 @@ def test_style_node_runs_scanners_when_payloads_empty(
     monkeypatch.setattr(nodes, "run_terraform_fmt", _FakeTool([]))
     _patch_llm(
         monkeypatch,
-        SpecialistReview(
-            findings=[LLMFinding(severity="low", file="main.tf", rule="tflint:z", message="ok")]
-        ),
+        SpecialistAnnotations(annotations=[FindingAnnotation(id=0, message="ok")]),
     )
 
     out = nodes.style_node(state)
@@ -608,10 +745,14 @@ def test_style_node_runs_scanners_when_payloads_empty(
     assert [f.rule for f in out["style"]] == ["tflint:z"]
 
 
-def test_style_node_filters_unchanged_files_pre_and_post(
+def test_style_node_pre_filters_unchanged_and_post_filters_discovered(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    # Pre-filter: an unchanged-file scanner finding never reaches the LLM.
+    # Post-filter (discovery on): a discovered finding outside the changed files
+    # is stripped from the output.
     (tmp_path / "main.tf").write_text("variable x {}\n")
+    monkeypatch.setattr(nodes.settings, "enable_llm_findings", True)
     state = _state(tmp_path, files=[ChangedFile(path="main.tf")])
 
     monkeypatch.setattr(
@@ -620,35 +761,39 @@ def test_style_node_filters_unchanged_files_pre_and_post(
         _FakeTool(
             [
                 Finding(
+                    agent="style", severity="low", file="main.tf", rule="tflint:z", message="r"
+                ),
+                Finding(
                     agent="style",
                     severity="low",
                     file="legacy/old.tf",
                     rule="tflint:unchanged",
                     message="r",
-                )
+                ),
             ]
         ),
     )
     monkeypatch.setattr(nodes, "run_terraform_fmt", _FakeTool([]))
     llm = _patch_llm(
         monkeypatch,
-        SpecialistReview(
-            findings=[
+        SpecialistAnnotations(
+            annotations=[FindingAnnotation(id=0, message="ok")],
+            discovered=[
                 LLMFinding(
-                    severity="low", file="legacy/old.tf", rule="tflint:unchanged", message="leak"
+                    severity="low", file="legacy/old.tf", rule="style:llm-leak", message="leak"
                 ),
-                LLMFinding(severity="low", file="main.tf", rule="style:llm-1", message="ok"),
-            ]
+                LLMFinding(severity="low", file="main.tf", rule="style:llm-1", message="real"),
+            ],
         ),
     )
 
     out = nodes.style_node(state)
 
-    # Unchanged-file scanner finding never reaches the LLM (pre-filter), and the
-    # LLM's unchanged-file finding is stripped from the output (post-filter).
     human = llm.structured.messages[1].content
     assert "tflint:unchanged" not in human
-    assert [f.file for f in out["style"]] == ["main.tf"]
+    assert "legacy/old.tf" not in human
+    assert sorted(f.file for f in out["style"]) == ["main.tf", "main.tf"]
+    assert "style:llm-leak" not in [f.rule for f in out["style"]]
 
 
 # ---------------------------------------------------------------------------
@@ -656,13 +801,13 @@ def test_style_node_filters_unchanged_files_pre_and_post(
 # ---------------------------------------------------------------------------
 
 
-def test_review_with_llm_coerces_dict_output(
+def test_annotate_with_llm_coerces_dict_output(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     # Some providers return a dict rather than the pydantic model instance.
     class _DictStructured:
         def invoke(self, _messages: Any) -> dict[str, Any]:
-            return {"findings": [{"severity": "info", "file": "a.tf", "rule": "r", "message": "m"}]}
+            return {"annotations": [{"id": 0, "message": "m", "suggestion": None}]}
 
     class _DictLLM:
         def with_structured_output(self, _schema: Any) -> _DictStructured:
@@ -670,8 +815,10 @@ def test_review_with_llm_coerces_dict_output(
 
     monkeypatch.setattr(nodes, "get_llm", lambda *a, **k: _DictLLM())
 
-    findings = nodes._review_with_llm("security", "sys", [], [])
+    raw = [Finding(agent="security", severity="info", file="a.tf", rule="r", message="raw")]
+    findings = nodes._annotate_with_llm("security", raw, [])
 
     assert len(findings) == 1
     assert findings[0].agent == "security"
     assert findings[0].rule == "r"
+    assert findings[0].message == "m"

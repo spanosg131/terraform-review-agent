@@ -17,6 +17,7 @@ def get_llm(
     provider: LLMProvider | None = None,
     model: str | None = None,
     temperature: float | None = None,
+    seed: int | None = None,
 ) -> BaseChatModel:
     """Return a chat model for ``provider`` configured with ``model``/``temperature``.
 
@@ -24,6 +25,10 @@ def get_llm(
     package only matters when that provider is actually requested. Raises
     :class:`RuntimeError` when the corresponding API key is unset and
     :class:`ValueError` for an unknown provider.
+
+    ``seed`` (default :data:`settings.default_llm_seed`) is forwarded to OpenAI
+    for best-effort reproducible sampling; Anthropic and Google have no
+    equivalent knob, so it is ignored there.
     """
 
     chosen_provider: LLMProvider = provider or settings.default_llm_provider
@@ -31,6 +36,7 @@ def get_llm(
     chosen_temperature = (
         temperature if temperature is not None else settings.default_llm_temperature
     )
+    chosen_seed = seed if seed is not None else settings.default_llm_seed
 
     api_key = settings.provider_key(chosen_provider)
     if api_key is None:
@@ -46,6 +52,7 @@ def get_llm(
             model=chosen_model,
             temperature=chosen_temperature,
             api_key=api_key,
+            seed=chosen_seed,
         )
 
     if chosen_provider == "anthropic":

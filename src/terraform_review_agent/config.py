@@ -10,7 +10,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 LLMProvider = Literal["openai", "anthropic", "google"]
@@ -40,6 +40,17 @@ class Settings(BaseSettings):
     default_llm_provider: LLMProvider = "anthropic"
     default_llm_model: str = "claude-sonnet-4-5"
     default_llm_temperature: float = 0.0
+    # Best-effort determinism for providers that honor it (OpenAI). Reasoning
+    # models still vary somewhat; pair with a pinned model snapshot. Set to
+    # `none`/`off` to disable (a blank env value is treated as unset and keeps
+    # the default).
+    default_llm_seed: int | None = 7
+    # When false (default) the specialist LLMs may only reword/clarify findings
+    # the scanners produced — they cannot invent new `*:llm-` findings. Scanners
+    # own detection and severity, so the finding *set* is deterministic across
+    # runs. Flip to true to re-enable speculative LLM-discovered findings (more
+    # coverage, less run-to-run consistency).
+    enable_llm_findings: bool = False
 
     sqlite_path: str = "./data/state.sqlite"
 
@@ -66,6 +77,20 @@ class Settings(BaseSettings):
         default="<!-- terraform-review-agent:v1 -->",
         description="Hidden HTML marker used to find/upsert the bot's PR comment.",
     )
+
+    @field_validator("default_llm_seed", mode="before")
+    @classmethod
+    def _seed_sentinel(cls, value: object) -> object:
+        """Map a ``none``/``off`` env string to ``None`` so the seed can be disabled.
+
+        Pydantic can't coerce ``"none"`` to ``int | None`` on its own (it errors),
+        so the explicit off-switch is a sentinel string. A blank value never
+        reaches here — ``env_ignore_empty`` drops it and the default applies.
+        """
+
+        if isinstance(value, str) and value.strip().lower() in {"none", "off", "disabled"}:
+            return None
+        return value
 
     def provider_key(self, provider: LLMProvider | None = None) -> SecretStr | None:
         """Return the API key for ``provider`` (defaults to the configured provider)."""
