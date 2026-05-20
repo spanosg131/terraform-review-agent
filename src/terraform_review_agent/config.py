@@ -28,6 +28,9 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
+        # Treat empty env values (`KEY=`) as unset so copying `.env.example`
+        # doesn't crash int parsing or turn blank keys into SecretStr("").
+        env_ignore_empty=True,
     )
 
     openai_api_key: SecretStr | None = None
