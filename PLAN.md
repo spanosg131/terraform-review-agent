@@ -145,9 +145,9 @@ Parallel branches write to disjoint fields — no reducer needed.
 >   `app` user cannot write.
 
 ### Phase 8 — Tests + polish
-- [ ] Integration test: compiled graph end-to-end with mocked LLM + recorded scanner output
-- [ ] `README.md` (consumer-facing: how to call the reusable workflow, required secrets, sample comment)
-- [ ] `make fmt lint type test` green on a clean checkout
+- [x] Integration test: compiled graph end-to-end with mocked LLM + recorded scanner output
+- [x] `README.md` (consumer-facing: how to call the reusable workflow, required secrets, sample comment)
+- [x] `make fmt lint type test` green on a clean checkout
 
 ---
 
