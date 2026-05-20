@@ -31,7 +31,10 @@ def test_graph_runs_with_terraform_changes() -> None:
     assert final["security"] == []
     assert final["cost"] == []
     assert final["style"] == []
-    assert final["comment_markdown"] == ""
+    # With no findings the aggregator still renders a clean "all clear" comment.
+    assert final["comment_markdown"] == (
+        "## Terraform Review\n\nNo issues found in the changed Terraform files.\n"
+    )
 
 
 def test_graph_skips_when_no_terraform_files_changed() -> None:

@@ -5,15 +5,20 @@ Topology — specialist branches fan out in parallel, then aggregate:
     start ──► [security ∥ cost ∥ style] ──► aggregator ──► post_comment
 
 The specialist branches write to disjoint state fields, so no reducers are
-required. The specialist nodes live in :mod:`utils.nodes`; ``aggregator`` and
-``post_comment`` are still no-op stubs pending Phases 5-6.
+required. The specialist + aggregator nodes live in :mod:`utils.nodes`;
+``post_comment`` is still a no-op stub pending Phase 6.
 """
 
 from __future__ import annotations
 
 from langgraph.graph import END, START, StateGraph
 
-from terraform_review_agent.utils.nodes import cost_node, security_node, style_node
+from terraform_review_agent.utils.nodes import (
+    aggregator_node,
+    cost_node,
+    security_node,
+    style_node,
+)
 from terraform_review_agent.utils.state import ReviewState
 
 
@@ -23,12 +28,6 @@ def start_node(state: ReviewState) -> dict[str, object]:
     if not state.pr.has_terraform_changes:
         return {"skipped": True, "skip_reason": "no terraform files changed"}
     return {"skipped": False}
-
-
-def aggregator_node(state: ReviewState) -> dict[str, object]:
-    """Placeholder — Phase 5 renders the severity-ranked markdown comment."""
-
-    return {"comment_markdown": ""}
 
 
 def post_comment_node(state: ReviewState) -> dict[str, object]:

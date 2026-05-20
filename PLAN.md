@@ -104,10 +104,10 @@ Parallel branches write to disjoint fields — no reducer needed.
 - [x] Unit test per node with mocked LLM + subprocess
 
 ### Phase 5 — Aggregator + renderer
-- [ ] `nodes.aggregator_node` — merge, dedupe by `(file, rule, line)`, severity-rank
-- [ ] Markdown renderer — severity sections, per-agent `<details>` blocks, file:line links
-- [ ] Low-severity collapse behavior (always post; collapse `info`/`low` into `<details>`)
-- [ ] Unit tests for dedupe + renderer snapshots
+- [x] `nodes.aggregator_node` — merge, dedupe by `(file, rule, line)`, severity-rank
+- [x] Markdown renderer — severity sections, per-agent `<details>` blocks, file:line links
+- [x] Low-severity collapse behavior (always post; collapse `info`/`low` into `<details>`)
+- [x] Unit tests for dedupe + renderer snapshots
 
 ### Phase 6 — Prebuilt container image
 - [ ] Extend `Dockerfile` to bundle pinned `terraform`, `tfsec`, `tflint`, `infracost` binaries + `checkov` (in the `.venv`)

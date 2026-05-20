@@ -26,6 +26,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from terraform_review_agent.llm import get_llm
 from terraform_review_agent.utils import prompts
+from terraform_review_agent.utils.render import render_comment
 from terraform_review_agent.utils.state import (
     AgentName,
     Finding,
@@ -149,3 +150,14 @@ def style_node(state: ReviewState) -> dict[str, list[Finding]]:
     )
     findings = _review_with_llm("style", prompts.STYLE_SYSTEM_PROMPT, raw, payloads)
     return {"style": _filter_to_changed(findings, changed)}
+
+
+def aggregator_node(state: ReviewState) -> dict[str, str]:
+    """Merge the specialist branches into the rendered sticky-comment markdown.
+
+    Dedupe/severity-rank/render all live in :mod:`utils.render`; this node just
+    feeds it the joined findings and the PR context for file:line links.
+    """
+
+    markdown = render_comment(state.all_findings(), state.pr)
+    return {"comment_markdown": markdown}
