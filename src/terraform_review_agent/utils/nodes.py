@@ -12,9 +12,11 @@ Each node:
 4. Stamps the owning agent name onto each finding and writes its disjoint state
    field (``security`` / ``cost`` / ``style``).
 
-A node short-circuits before touching scanners or the LLM when there is nothing
-to review (no Terraform payloads; for cost, no configured infracost baseline or
-no cost delta), which keeps token usage and CI runtime down on trivial PRs.
+A node short-circuits before touching scanners or the LLM when the PR changed no
+Terraform files (for cost, also when the infracost key is unset), which keeps
+token usage and CI runtime down on trivial PRs. Scanner coverage does not depend
+on LLM payloads being buildable: a large PR whose patches GitHub omitted yields
+empty payloads but is still scanned from the workspace on disk.
 """
 
 from __future__ import annotations
@@ -105,14 +107,19 @@ def _review_with_llm(
 def security_node(state: ReviewState) -> dict[str, list[Finding]]:
     """tfsec + checkov, then LLM normalization into security findings."""
 
-    payloads = prepare_file_payloads(state.pr, state.workspace)
-    if not payloads:
-        return {"security": []}
     changed = state.pr.changed_terraform_paths
+    if not changed:
+        return {"security": []}
+    # Scanners read the workspace from disk, so they run whether or not we could
+    # build LLM payloads — a large PR with omitted patches yields empty payloads
+    # but must still be scanned.
+    payloads = prepare_file_payloads(state.pr, state.workspace)
     raw = _filter_to_changed(
         _collect([("tfsec", run_tfsec), ("checkov", run_checkov)], state.workspace),
         changed,
     )
+    if not (raw or payloads):
+        return {"security": []}
     findings = _review_with_llm("security", prompts.SECURITY_SYSTEM_PROMPT, raw, payloads)
     return {"security": _filter_to_changed(findings, changed)}
 
@@ -133,9 +140,11 @@ def cost_node(state: ReviewState) -> dict[str, object]:
     if settings.infracost_api_key is None:
         log.info("cost.skipped", reason="no infracost api key")
         return {"cost": []}
-    payloads = prepare_file_payloads(state.pr, state.workspace)
-    if not payloads:
+    if not state.pr.has_terraform_changes:
         return {"cost": []}
+    # Empty payloads (large PR, omitted patches) must not skip infracost — it
+    # prices the workspace on disk and doesn't need the LLM payloads.
+    payloads = prepare_file_payloads(state.pr, state.workspace)
     usage_file = build_synced_usage_file(state.workspace)
     try:
         baseline = state.cost_baseline_path or build_infracost_baseline(
@@ -171,10 +180,12 @@ def cost_node(state: ReviewState) -> dict[str, object]:
 def style_node(state: ReviewState) -> dict[str, list[Finding]]:
     """tflint + terraform fmt, then LLM into concise style findings."""
 
-    payloads = prepare_file_payloads(state.pr, state.workspace)
-    if not payloads:
-        return {"style": []}
     changed = state.pr.changed_terraform_paths
+    if not changed:
+        return {"style": []}
+    # Scanners read the workspace from disk; run them even when payloads are
+    # empty (large PR with omitted patches) so coverage isn't silently dropped.
+    payloads = prepare_file_payloads(state.pr, state.workspace)
     raw = _filter_to_changed(
         _collect(
             [("tflint", run_tflint), ("terraform-fmt", run_terraform_fmt)],
@@ -182,6 +193,8 @@ def style_node(state: ReviewState) -> dict[str, list[Finding]]:
         ),
         changed,
     )
+    if not (raw or payloads):
+        return {"style": []}
     findings = _review_with_llm("style", prompts.STYLE_SYSTEM_PROMPT, raw, payloads)
     return {"style": _filter_to_changed(findings, changed)}
 

@@ -228,14 +228,46 @@ def test_security_node_drops_llm_findings_outside_changed_files(
     assert [f.file for f in out["security"]] == ["main.tf"]
 
 
-def test_security_node_skips_when_no_terraform_payloads(
+def test_security_node_skips_when_no_terraform_changes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _forbid_llm(monkeypatch)
-    # File is declared changed but absent on disk with no patch -> no payload.
-    state = _state(tmp_path, files=[ChangedFile(path="missing.tf")])
+    tfsec, checkov = _FakeTool([]), _FakeTool([])
+    monkeypatch.setattr(nodes, "run_tfsec", tfsec)
+    monkeypatch.setattr(nodes, "run_checkov", checkov)
+    # No Terraform file changed -> nothing to scan or review.
+    state = _state(tmp_path, files=[ChangedFile(path="README.md")])
 
     assert nodes.security_node(state) == {"security": []}
+    assert tfsec.calls == [] and checkov.calls == []
+
+
+def test_security_node_runs_scanners_when_payloads_empty(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Regression: a large PR whose patches GitHub omitted yields empty payloads,
+    but the Terraform files still need scanning. The node must run scanners and
+    surface their findings rather than skipping the whole review."""
+
+    # Terraform file changed but absent on disk with no patch -> payloads empty.
+    state = _state(tmp_path, files=[ChangedFile(path="main.tf")])
+
+    tfsec = _FakeTool(
+        [Finding(agent="security", severity="high", file="main.tf", rule="tfsec:x", message="raw")]
+    )
+    monkeypatch.setattr(nodes, "run_tfsec", tfsec)
+    monkeypatch.setattr(nodes, "run_checkov", _FakeTool([]))
+    _patch_llm(
+        monkeypatch,
+        SpecialistReview(
+            findings=[LLMFinding(severity="high", file="main.tf", rule="tfsec:x", message="ok")]
+        ),
+    )
+
+    out = nodes.security_node(state)
+
+    assert tfsec.calls == [{"working_dir": str(tmp_path)}]
+    assert [f.rule for f in out["security"]] == ["tfsec:x"]
 
 
 def test_security_node_tolerates_missing_scanner_binary(
@@ -275,6 +307,53 @@ def test_cost_node_skips_without_api_key(monkeypatch: pytest.MonkeyPatch, tmp_pa
     state = _state(tmp_path, files=[ChangedFile(path="main.tf")], baseline=str(tmp_path / "b.json"))
 
     assert nodes.cost_node(state) == {"cost": []}
+
+
+def test_cost_node_runs_infracost_when_payloads_empty(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Regression: empty payloads (large PR, omitted patches) must not suppress
+    infracost, which prices the workspace on disk without LLM payloads."""
+
+    monkeypatch.setattr(nodes.settings, "infracost_api_key", SecretStr("k"))
+    # Terraform file changed but absent on disk with no patch -> payloads empty.
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text("{}")
+    state = _state(tmp_path, files=[ChangedFile(path="main.tf")], baseline=str(baseline))
+
+    infracost = _FakeTool(
+        CostReport(
+            findings=[
+                Finding(
+                    agent="cost",
+                    severity="medium",
+                    file="main.tf",
+                    rule="infracost:resource-delta",
+                    message="raw delta",
+                )
+            ],
+            summary=CostSummary(total_monthly=26.0, delta_monthly=25.0),
+        )
+    )
+    monkeypatch.setattr(nodes, "run_infracost_diff", infracost)
+    _patch_llm(
+        monkeypatch,
+        SpecialistReview(
+            findings=[
+                LLMFinding(
+                    severity="medium",
+                    file="main.tf",
+                    rule="infracost:resource-delta",
+                    message="+$25/mo",
+                )
+            ]
+        ),
+    )
+
+    out = nodes.cost_node(state)
+
+    assert infracost.calls and infracost.calls[0]["working_dir"] == str(tmp_path)
+    assert [f.rule for f in out["cost"]] == ["infracost:resource-delta"]
 
 
 def test_cost_node_runs_infracost_then_llm(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -490,13 +569,43 @@ def test_style_node_runs_scanners_then_llm(monkeypatch: pytest.MonkeyPatch, tmp_
     assert out["style"][0].severity == "low"
 
 
-def test_style_node_skips_when_no_terraform_payloads(
+def test_style_node_skips_when_no_terraform_changes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _forbid_llm(monkeypatch)
+    tflint, fmt = _FakeTool([]), _FakeTool([])
+    monkeypatch.setattr(nodes, "run_tflint", tflint)
+    monkeypatch.setattr(nodes, "run_terraform_fmt", fmt)
     state = _state(tmp_path, files=[ChangedFile(path="README.md")])
 
     assert nodes.style_node(state) == {"style": []}
+    assert tflint.calls == [] and fmt.calls == []
+
+
+def test_style_node_runs_scanners_when_payloads_empty(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Regression: empty payloads (large PR, omitted patches) must not suppress
+    the style scanners, which read the workspace from disk."""
+
+    state = _state(tmp_path, files=[ChangedFile(path="main.tf")])
+
+    tflint = _FakeTool(
+        [Finding(agent="style", severity="low", file="main.tf", rule="tflint:z", message="raw")]
+    )
+    monkeypatch.setattr(nodes, "run_tflint", tflint)
+    monkeypatch.setattr(nodes, "run_terraform_fmt", _FakeTool([]))
+    _patch_llm(
+        monkeypatch,
+        SpecialistReview(
+            findings=[LLMFinding(severity="low", file="main.tf", rule="tflint:z", message="ok")]
+        ),
+    )
+
+    out = nodes.style_node(state)
+
+    assert tflint.calls == [{"working_dir": str(tmp_path)}]
+    assert [f.rule for f in out["style"]] == ["tflint:z"]
 
 
 def test_style_node_filters_unchanged_files_pre_and_post(
