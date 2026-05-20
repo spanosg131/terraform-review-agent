@@ -70,14 +70,20 @@ def _run(
     ok_exit_codes: tuple[int, ...] = (0,),
 ) -> subprocess.CompletedProcess[str]:
     log.debug("scanner.run", cmd=cmd, cwd=str(cwd))
-    completed = subprocess.run(
-        cmd,
-        cwd=str(cwd),
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            cmd,
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # TimeoutExpired is a SubprocessError, not a ScannerError, so without
+        # this it escapes the node-level ScannerError handlers and fails the
+        # whole review instead of skipping the one hung scanner.
+        raise ScannerError(f"{Path(cmd[0]).name!r} timed out after {timeout}s") from exc
     if completed.returncode not in ok_exit_codes:
         tail = (completed.stderr or completed.stdout or "").strip()[:400]
         raise ScannerError(f"{Path(cmd[0]).name!r} exited with code {completed.returncode}: {tail}")

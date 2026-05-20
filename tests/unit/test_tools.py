@@ -203,6 +203,24 @@ def test_run_tfsec_raises_on_unexpected_exit_code(
         run_tfsec.invoke({"working_dir": str(tmp_path)})
 
 
+def test_run_converts_timeout_to_scanner_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Regression: a hung scanner raises subprocess.TimeoutExpired, which is a
+    SubprocessError (not a ScannerError). _run must convert it so the node-level
+    ScannerError handlers skip the one scanner instead of failing the review."""
+
+    monkeypatch.setattr(tools.shutil, "which", lambda _name: "/usr/bin/tfsec")
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout", 0))
+
+    monkeypatch.setattr(tools.subprocess, "run", fake_run)
+
+    with pytest.raises(ScannerError, match="timed out"):
+        run_tfsec.invoke({"working_dir": str(tmp_path)})
+
+
 # ---------------------------------------------------------------------------
 # checkov
 # ---------------------------------------------------------------------------
