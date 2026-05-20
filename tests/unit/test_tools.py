@@ -73,6 +73,34 @@ def _stub_subprocess(
 
 
 # ---------------------------------------------------------------------------
+# _relpath
+# ---------------------------------------------------------------------------
+
+
+def test_relpath_normalizes_absolute_path_under_relative_working_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Regression: CI passes ``working_dir="."`` but tfsec/tflint report
+    filesystem-absolute paths. ``_relpath`` must resolve ``"."`` to the cwd so
+    the path becomes repo-relative; otherwise ``_filter_to_changed`` drops the
+    finding as "unchanged"."""
+
+    monkeypatch.chdir(tmp_path)
+    abs_path = (tmp_path / "modules" / "db" / "main.tf").resolve()
+
+    assert tools._relpath(str(abs_path), Path(".")) == "modules/db/main.tf"
+
+
+def test_relpath_treats_checkov_leading_slash_as_workspace_relative(
+    tmp_path: Path,
+) -> None:
+    """checkov reports ``/main.tf`` to mean workspace-relative, not absolute;
+    such paths fall back to a stripped relative path."""
+
+    assert tools._relpath("/main.tf", tmp_path) == "main.tf"
+
+
+# ---------------------------------------------------------------------------
 # tfsec
 # ---------------------------------------------------------------------------
 

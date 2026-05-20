@@ -97,7 +97,9 @@ def _relpath(raw_path: str, working_dir: Path) -> str:
     p = Path(raw_path)
     if p.is_absolute():
         try:
-            return p.relative_to(working_dir).as_posix()
+            # Resolve working_dir: scanners report absolute paths, but the
+            # workspace is often a relative "." (CI), which never matches.
+            return p.relative_to(working_dir.resolve()).as_posix()
         except ValueError:
             return p.as_posix().lstrip("/")
     return p.as_posix()
