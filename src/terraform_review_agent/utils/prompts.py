@@ -67,6 +67,8 @@ Rules:
   typically low or info; reserve medium for genuinely error-prone patterns.
 - `file` is the repository-relative path; `line` is the relevant line, or null.
   `message` concise; `suggestion` concrete or null.
+- Only report issues in the changed Terraform files shown below; drop anything
+  unrelated to the changed code.
 - Do not duplicate the same issue. Return an empty list if the code is clean."""
 
 

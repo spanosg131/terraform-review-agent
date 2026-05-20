@@ -75,6 +75,19 @@ def test_changed_file_is_terraform_uses_previous_path() -> None:
     assert non_tf.is_terraform is False
 
 
+def test_changed_terraform_paths_collects_tf_paths_and_previous_names() -> None:
+    pr = _pr(
+        [
+            ChangedFile(path="infra/main.tf"),
+            ChangedFile(path="README.md"),
+            ChangedFile(path="renamed.txt", status="renamed", previous_path="old.tf"),
+        ]
+    )
+
+    # Non-terraform files are excluded; renamed-away files contribute both names.
+    assert pr.changed_terraform_paths == {"infra/main.tf", "renamed.txt", "old.tf"}
+
+
 def test_finding_severity_rank_matches_order() -> None:
     critical = Finding(
         agent="security",

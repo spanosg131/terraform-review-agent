@@ -58,6 +58,17 @@ def _collect(scanners: list[tuple[str, Any]], working_dir: str) -> list[Finding]
     return findings
 
 
+def _filter_to_changed(findings: list[Finding], changed_paths: set[str]) -> list[Finding]:
+    """Keep only findings attributable to a Terraform file this PR changed.
+
+    Scanners run over the whole workspace, so findings in unchanged files (and
+    findings with no resolvable path) would otherwise leak into the review. This
+    scopes them deterministically instead of relying on the LLM to drop them.
+    """
+
+    return [f for f in findings if f.file in changed_paths]
+
+
 def _review_with_llm(
     agent: AgentName,
     system_prompt: str,
@@ -92,8 +103,13 @@ def security_node(state: ReviewState) -> dict[str, list[Finding]]:
     payloads = prepare_file_payloads(state.pr, state.workspace)
     if not payloads:
         return {"security": []}
-    raw = _collect([("tfsec", run_tfsec), ("checkov", run_checkov)], state.workspace)
-    return {"security": _review_with_llm("security", prompts.SECURITY_SYSTEM_PROMPT, raw, payloads)}
+    changed = state.pr.changed_terraform_paths
+    raw = _filter_to_changed(
+        _collect([("tfsec", run_tfsec), ("checkov", run_checkov)], state.workspace),
+        changed,
+    )
+    findings = _review_with_llm("security", prompts.SECURITY_SYSTEM_PROMPT, raw, payloads)
+    return {"security": _filter_to_changed(findings, changed)}
 
 
 def cost_node(state: ReviewState) -> dict[str, list[Finding]]:
@@ -123,8 +139,13 @@ def style_node(state: ReviewState) -> dict[str, list[Finding]]:
     payloads = prepare_file_payloads(state.pr, state.workspace)
     if not payloads:
         return {"style": []}
-    raw = _collect(
-        [("tflint", run_tflint), ("terraform-fmt", run_terraform_fmt)],
-        state.workspace,
+    changed = state.pr.changed_terraform_paths
+    raw = _filter_to_changed(
+        _collect(
+            [("tflint", run_tflint), ("terraform-fmt", run_terraform_fmt)],
+            state.workspace,
+        ),
+        changed,
     )
-    return {"style": _review_with_llm("style", prompts.STYLE_SYSTEM_PROMPT, raw, payloads)}
+    findings = _review_with_llm("style", prompts.STYLE_SYSTEM_PROMPT, raw, payloads)
+    return {"style": _filter_to_changed(findings, changed)}

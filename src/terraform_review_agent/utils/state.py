@@ -66,6 +66,23 @@ class PRContext(BaseModel):
     def has_terraform_changes(self) -> bool:
         return any(f.is_terraform for f in self.changed_files)
 
+    @property
+    def changed_terraform_paths(self) -> set[str]:
+        """Repo-relative paths of changed Terraform files (incl. pre-rename names).
+
+        Used to scope repo-wide scanner findings down to the files this PR
+        actually touched.
+        """
+
+        paths: set[str] = set()
+        for f in self.changed_files:
+            if not f.is_terraform:
+                continue
+            paths.add(f.path)
+            if f.previous_path:
+                paths.add(f.previous_path)
+        return paths
+
 
 class Finding(BaseModel):
     """A single normalized review finding produced by a specialist agent."""

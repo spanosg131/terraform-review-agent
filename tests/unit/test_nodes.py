@@ -148,6 +148,75 @@ def test_security_node_runs_scanners_then_llm(
     assert "aws_s3_bucket" in human
 
 
+def test_security_node_filters_unchanged_file_findings_from_llm_input(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Scanners run repo-wide; a finding in an unchanged file must not be fed to
+    # the LLM (deterministic pre-filter), only the changed-file finding.
+    (tmp_path / "main.tf").write_text('resource "aws_s3_bucket" "b" {}\n')
+    state = _state(tmp_path, files=[ChangedFile(path="main.tf")])
+
+    tfsec = _FakeTool(
+        [
+            Finding(
+                agent="security", severity="high", file="main.tf", rule="tfsec:changed", message="r"
+            ),
+            Finding(
+                agent="security",
+                severity="high",
+                file="legacy/old.tf",
+                rule="tfsec:unchanged",
+                message="r",
+            ),
+        ]
+    )
+    monkeypatch.setattr(nodes, "run_tfsec", tfsec)
+    monkeypatch.setattr(nodes, "run_checkov", _FakeTool([]))
+    llm = _patch_llm(
+        monkeypatch,
+        SpecialistReview(
+            findings=[
+                LLMFinding(severity="high", file="main.tf", rule="tfsec:changed", message="ok")
+            ]
+        ),
+    )
+
+    out = nodes.security_node(state)
+
+    human = llm.structured.messages[1].content
+    assert "tfsec:changed" in human
+    assert "tfsec:unchanged" not in human
+    assert "legacy/old.tf" not in human
+    assert [f.rule for f in out["security"]] == ["tfsec:changed"]
+
+
+def test_security_node_drops_llm_findings_outside_changed_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Even if the LLM emits a finding for a file the PR did not touch, the
+    # post-filter removes it from the output.
+    (tmp_path / "main.tf").write_text("resource {}\n")
+    state = _state(tmp_path, files=[ChangedFile(path="main.tf")])
+
+    monkeypatch.setattr(nodes, "run_tfsec", _FakeTool([]))
+    monkeypatch.setattr(nodes, "run_checkov", _FakeTool([]))
+    _patch_llm(
+        monkeypatch,
+        SpecialistReview(
+            findings=[
+                LLMFinding(severity="high", file="main.tf", rule="security:llm-1", message="real"),
+                LLMFinding(
+                    severity="high", file="other/untouched.tf", rule="security:llm-2", message="x"
+                ),
+            ]
+        ),
+    )
+
+    out = nodes.security_node(state)
+
+    assert [f.file for f in out["security"]] == ["main.tf"]
+
+
 def test_security_node_skips_when_no_terraform_payloads(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -303,6 +372,49 @@ def test_style_node_skips_when_no_terraform_payloads(
     state = _state(tmp_path, files=[ChangedFile(path="README.md")])
 
     assert nodes.style_node(state) == {"style": []}
+
+
+def test_style_node_filters_unchanged_files_pre_and_post(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / "main.tf").write_text("variable x {}\n")
+    state = _state(tmp_path, files=[ChangedFile(path="main.tf")])
+
+    monkeypatch.setattr(
+        nodes,
+        "run_tflint",
+        _FakeTool(
+            [
+                Finding(
+                    agent="style",
+                    severity="low",
+                    file="legacy/old.tf",
+                    rule="tflint:unchanged",
+                    message="r",
+                )
+            ]
+        ),
+    )
+    monkeypatch.setattr(nodes, "run_terraform_fmt", _FakeTool([]))
+    llm = _patch_llm(
+        monkeypatch,
+        SpecialistReview(
+            findings=[
+                LLMFinding(
+                    severity="low", file="legacy/old.tf", rule="tflint:unchanged", message="leak"
+                ),
+                LLMFinding(severity="low", file="main.tf", rule="style:llm-1", message="ok"),
+            ]
+        ),
+    )
+
+    out = nodes.style_node(state)
+
+    # Unchanged-file scanner finding never reaches the LLM (pre-filter), and the
+    # LLM's unchanged-file finding is stripped from the output (post-filter).
+    human = llm.structured.messages[1].content
+    assert "tflint:unchanged" not in human
+    assert [f.file for f in out["style"]] == ["main.tf"]
 
 
 # ---------------------------------------------------------------------------
