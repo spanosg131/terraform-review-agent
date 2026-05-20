@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/infiniumtek/terraform-review-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/infiniumtek/terraform-review-agent/actions/workflows/ci.yml)
 [![Build Image](https://github.com/infiniumtek/terraform-review-agent/actions/workflows/build-image.yml/badge.svg)](https://github.com/infiniumtek/terraform-review-agent/actions/workflows/build-image.yml)
-[![License: MIT](https://img.shields.io/github/license/infiniumtek/terraform-review-agent?color=green)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 ![Python 3.13](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)
 ![LangGraph](https://img.shields.io/badge/LangGraph-1C3C3C?logo=langchain&logoColor=white)
