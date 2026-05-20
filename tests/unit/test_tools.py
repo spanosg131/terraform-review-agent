@@ -501,7 +501,11 @@ def test_prepare_file_payloads_falls_back_to_diff_only_above_threshold(
     assert all(p.mode == "diff_only" for p in payloads)
 
 
-def test_prepare_file_payloads_skips_removed_and_non_terraform(tmp_path: Path) -> None:
+def test_prepare_file_payloads_skips_non_terraform_and_patchless_removed(
+    tmp_path: Path,
+) -> None:
+    # Non-terraform files are excluded; a removed file with no patch has nothing
+    # to read on disk and no diff to fall back to, so it is skipped too.
     (tmp_path / "main.tf").write_text("resource {}")
     (tmp_path / "README.md").write_text("hi")
     pr = _pr(
@@ -516,6 +520,29 @@ def test_prepare_file_payloads_skips_removed_and_non_terraform(tmp_path: Path) -
 
     assert [p.path for p in payloads] == ["main.tf"]
     assert payloads[0].mode == "full"
+
+
+def test_prepare_file_payloads_emits_diff_only_for_removed_file_with_patch(
+    tmp_path: Path,
+) -> None:
+    # A deleted .tf file is gone from disk but its patch carries the removed
+    # lines — surface it as a diff_only payload so deletions stay reviewable.
+    pr = _pr(
+        [
+            ChangedFile(
+                path="deleted.tf",
+                status="removed",
+                patch='@@ -1,2 +0,0 @@\n-resource "aws_kms_key" "k" {}\n',
+            )
+        ]
+    )
+
+    payloads = prepare_file_payloads(pr, tmp_path)
+
+    assert len(payloads) == 1
+    assert payloads[0].path == "deleted.tf"
+    assert payloads[0].mode == "diff_only"
+    assert payloads[0].content.startswith("@@")
 
 
 def test_prepare_file_payloads_falls_back_to_patch_when_file_missing(

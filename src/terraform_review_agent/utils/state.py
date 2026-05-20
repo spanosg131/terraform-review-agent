@@ -76,6 +76,27 @@ class Finding(BaseModel):
         return SEVERITY_ORDER[self.severity]
 
 
+class LLMFinding(BaseModel):
+    """A finding as emitted by a specialist LLM (no ``agent`` field).
+
+    The owning node knows which agent it is and stamps that label when mapping
+    these to :class:`Finding`, so the model can't mislabel the source.
+    """
+
+    severity: Severity
+    file: str
+    line: int | None = None
+    rule: str
+    message: str
+    suggestion: str | None = None
+
+
+class SpecialistReview(BaseModel):
+    """Structured-output container bound to a specialist LLM call."""
+
+    findings: list[LLMFinding] = Field(default_factory=list)
+
+
 class ReviewState(BaseModel):
     """Top-level graph state.
 
@@ -85,6 +106,14 @@ class ReviewState(BaseModel):
     """
 
     pr: PRContext
+    workspace: str = Field(
+        default=".",
+        description="Path to the checked-out PR head where scanners run.",
+    )
+    cost_baseline_path: str | None = Field(
+        default=None,
+        description="infracost baseline JSON (base-ref breakdown); cost agent skips when unset.",
+    )
     security: list[Finding] = Field(default_factory=list)
     cost: list[Finding] = Field(default_factory=list)
     style: list[Finding] = Field(default_factory=list)

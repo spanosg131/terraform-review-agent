@@ -89,7 +89,13 @@ def run(
         files=len(pr_context.changed_files),
     )
 
-    raw_final = agent.invoke(ReviewState(pr=pr_context))
+    raw_final = agent.invoke(
+        ReviewState(
+            pr=pr_context,
+            workspace=settings.workspace_dir,
+            cost_baseline_path=settings.infracost_baseline_path,
+        )
+    )
     final = ReviewState.model_validate(raw_final)
 
     if final.skipped:

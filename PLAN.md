@@ -97,11 +97,11 @@ Parallel branches write to disjoint fields — no reducer needed.
 - [x] Token/size caps: per-file content cap, fallback to diff-only above threshold
 
 ### Phase 4 — Specialist nodes
-- [ ] `nodes.security_node` — calls tfsec + checkov, LLM → `Finding[]`
-- [ ] `nodes.cost_node` — calls infracost, LLM → `Finding[]`
-- [ ] `nodes.style_node` — calls tflint + fmt, LLM → `Finding[]`
-- [ ] `utils/prompts.py` for each specialist (no inlined prompts in nodes)
-- [ ] Unit test per node with mocked LLM + subprocess
+- [x] `nodes.security_node` — calls tfsec + checkov, LLM → `Finding[]`
+- [x] `nodes.cost_node` — calls infracost, LLM → `Finding[]`
+- [x] `nodes.style_node` — calls tflint + fmt, LLM → `Finding[]`
+- [x] `utils/prompts.py` for each specialist (no inlined prompts in nodes)
+- [x] Unit test per node with mocked LLM + subprocess
 
 ### Phase 5 — Aggregator + renderer
 - [ ] `nodes.aggregator_node` — merge, dedupe by `(file, rule, line)`, severity-rank

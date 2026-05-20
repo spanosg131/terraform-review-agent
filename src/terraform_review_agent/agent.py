@@ -5,15 +5,15 @@ Topology — specialist branches fan out in parallel, then aggregate:
     start ──► [security ∥ cost ∥ style] ──► aggregator ──► post_comment
 
 The specialist branches write to disjoint state fields, so no reducers are
-required. Real node implementations land in Phases 3-5; for now they are
-no-op stubs that preserve the topology and let ``make test`` exercise the
-compiled graph end-to-end.
+required. The specialist nodes live in :mod:`utils.nodes`; ``aggregator`` and
+``post_comment`` are still no-op stubs pending Phases 5-6.
 """
 
 from __future__ import annotations
 
 from langgraph.graph import END, START, StateGraph
 
+from terraform_review_agent.utils.nodes import cost_node, security_node, style_node
 from terraform_review_agent.utils.state import ReviewState
 
 
@@ -23,24 +23,6 @@ def start_node(state: ReviewState) -> dict[str, object]:
     if not state.pr.has_terraform_changes:
         return {"skipped": True, "skip_reason": "no terraform files changed"}
     return {"skipped": False}
-
-
-def security_node(state: ReviewState) -> dict[str, object]:
-    """Placeholder — Phase 4 wires tfsec + checkov + LLM normalization."""
-
-    return {"security": []}
-
-
-def cost_node(state: ReviewState) -> dict[str, object]:
-    """Placeholder — Phase 4 wires infracost + LLM annotation."""
-
-    return {"cost": []}
-
-
-def style_node(state: ReviewState) -> dict[str, object]:
-    """Placeholder — Phase 4 wires terraform fmt + tflint + LLM."""
-
-    return {"style": []}
 
 
 def aggregator_node(state: ReviewState) -> dict[str, object]:

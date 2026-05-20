@@ -480,10 +480,12 @@ def prepare_file_payloads(
 
     For each terraform-relevant changed file we:
 
-    * Skip removed files (nothing to read on disk).
     * Read the file content from ``working_dir`` and cap it at
       ``per_file_cap_bytes`` (replacing the overflow with a truncation
       marker).
+    * For files not present on disk (e.g. removed by the PR), fall back to the
+      file's PR patch as a ``diff_only`` payload so deletions are still
+      reviewable from the diff.
     * If the combined post-cap content exceeds ``total_threshold_bytes``, fall
       back to sending only each file's PR patch (diff) instead of the full
       content, so the LLM still gets context without blowing the token budget.
@@ -491,9 +493,7 @@ def prepare_file_payloads(
 
     base = Path(working_dir)
     candidates: list[ChangedFile] = [
-        f
-        for f in pr.changed_files
-        if f.status != "removed" and f.path.endswith(_TERRAFORM_SUFFIXES)
+        f for f in pr.changed_files if f.path.endswith(_TERRAFORM_SUFFIXES)
     ]
 
     full_payloads: list[FilePayload] = []

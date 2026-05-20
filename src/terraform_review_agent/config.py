@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     github_api_url: str = "https://api.github.com"
 
     infracost_api_key: SecretStr | None = None
+    infracost_baseline_path: str | None = None
+
+    workspace_dir: str = "."
 
     langsmith_api_key: SecretStr | None = None
     langsmith_tracing: bool = False
