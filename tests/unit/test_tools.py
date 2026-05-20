@@ -376,51 +376,62 @@ def test_severity_for_cost_delta(delta: float, expected: str) -> None:
     assert _severity_for_cost_delta(delta) == expected
 
 
-def test_parse_infracost_emits_resource_and_total_findings(tmp_path: Path) -> None:
+def test_parse_infracost_emits_resource_findings_and_summary(tmp_path: Path) -> None:
     payload = {
+        # Top-level totals drive the summary (head absolute + delta vs base).
+        "totalMonthlyCost": "120.00",
+        "diffTotalMonthlyCost": "25.00",
         "projects": [
             {
                 "name": "infra",
                 "diff": {
-                    "totalMonthlyCost": "120.00",
                     "resources": [
                         {"name": "aws_instance.web", "monthlyCost": "25.0"},
                         {"name": "aws_instance.cache", "monthlyCost": "0"},
                     ],
                 },
             }
-        ]
+        ],
     }
 
-    findings = _parse_infracost_diff(payload, tmp_path)
+    report = _parse_infracost_diff(payload, tmp_path)
 
-    rules = [f.rule for f in findings]
-    assert "infracost:resource-delta" in rules
-    assert "infracost:total-delta" in rules
-    total = next(f for f in findings if f.rule == "infracost:total-delta")
-    assert total.severity == "high"
-    resource = next(f for f in findings if f.rule == "infracost:resource-delta")
+    # Per-resource deltas only (zero ones skipped); no standalone total finding.
+    assert [f.rule for f in report.findings] == ["infracost:resource-delta"]
+    resource = report.findings[0]
     assert resource.severity == "medium"
     assert "aws_instance.web" in resource.message
+    assert "+$25.00" in resource.message
+    # The summary carries the absolute monthly total + the change.
+    assert report.summary is not None
+    assert report.summary.total_monthly == 120.0
+    assert report.summary.delta_monthly == 25.0
 
 
-def test_parse_infracost_skips_zero_and_unparseable(tmp_path: Path) -> None:
+def test_parse_infracost_skips_zero_resources_but_keeps_summary(tmp_path: Path) -> None:
     payload = {
+        "totalMonthlyCost": "21.90",
+        "diffTotalMonthlyCost": "0",
         "projects": [
             {
                 "name": "infra",
                 "diff": {
-                    "totalMonthlyCost": "0",
                     "resources": [
                         {"name": "r1", "monthlyCost": None},
                         {"name": "r2", "monthlyCost": "n/a"},
                     ],
                 },
             }
-        ]
+        ],
     }
 
-    assert _parse_infracost_diff(payload, tmp_path) == []
+    report = _parse_infracost_diff(payload, tmp_path)
+
+    # No resource deltas, but a cost-neutral PR still reports its absolute total.
+    assert report.findings == []
+    assert report.summary is not None
+    assert report.summary.total_monthly == 21.90
+    assert report.summary.delta_monthly == 0.0
 
 
 def test_run_infracost_diff_invokes_with_baseline(
@@ -434,11 +445,12 @@ def test_run_infracost_diff_invokes_with_baseline(
     baseline = tmp_path / "baseline.json"
     baseline.write_text("{}")
 
-    findings = run_infracost_diff.invoke(
+    report = run_infracost_diff.invoke(
         {"working_dir": str(tmp_path), "baseline_path": str(baseline)}
     )
 
-    assert findings == []
+    assert report.findings == []
+    assert report.summary is None
     cmd = captured["cmd"]
     assert "diff" in cmd
     assert "--compare-to" in cmd
@@ -572,3 +584,58 @@ def test_prepare_file_payloads_includes_terraform_renamed_to_non_terraform(
     assert payloads[0].path == "main.txt"
     assert payloads[0].mode == "full"
     assert payloads[0].content.startswith('resource "aws_s3_bucket"')
+
+
+# ---------------------------------------------------------------------------
+# build_infracost_baseline
+# ---------------------------------------------------------------------------
+
+
+def test_build_infracost_baseline_breaks_down_base_parent(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(tools, "_which_or_raise", lambda b: b)
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], *, cwd: Any, **_: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        if "breakdown" in cmd:
+            # infracost writes the JSON; emit a project named after its path so
+            # the rename-to-head-name step has something to overwrite.
+            out_file = cmd[cmd.index("--out-file") + 1]
+            Path(out_file).write_text(json.dumps({"projects": [{"name": "/tmp/base"}]}))
+        stdout = "basesha123\n" if "rev-parse" in cmd else ""
+        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(tools, "_run", fake_run)
+    # worktree cleanup goes through subprocess.run directly.
+    monkeypatch.setattr(
+        tools.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 0, "", ""),
+    )
+
+    path = tools.build_infracost_baseline("/ws", "acme/example")
+
+    assert path.endswith("infracost-base.json")
+    breakdown = next(c for c in calls if c and c[0] == "infracost")
+    assert "breakdown" in breakdown
+    assert breakdown[breakdown.index("--out-file") + 1] == path
+    worktree_add = next(c for c in calls if "worktree" in c and "add" in c)
+    assert worktree_add[-1] == "basesha123"
+    # The baseline's project name is pinned to the PR head's name so
+    # `infracost diff` pairs them into a single delta.
+    data = json.loads(Path(path).read_text())
+    assert [p["name"] for p in data["projects"]] == ["acme/example"]
+
+
+def test_build_infracost_baseline_raises_when_base_unresolvable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tools, "_which_or_raise", lambda b: b)
+    monkeypatch.setattr(
+        tools,
+        "_run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout="", stderr=""),
+    )
+
+    with pytest.raises(ScannerError):
+        tools.build_infracost_baseline("/ws", "acme/example")

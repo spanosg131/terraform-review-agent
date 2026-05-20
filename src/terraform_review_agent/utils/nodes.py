@@ -24,11 +24,13 @@ from typing import Any
 import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from terraform_review_agent.config import settings
 from terraform_review_agent.llm import get_llm
 from terraform_review_agent.utils import prompts
 from terraform_review_agent.utils.render import render_comment
 from terraform_review_agent.utils.state import (
     AgentName,
+    CostReport,
     Finding,
     ReviewState,
     SpecialistReview,
@@ -36,6 +38,7 @@ from terraform_review_agent.utils.state import (
 from terraform_review_agent.utils.tools import (
     FilePayload,
     ScannerError,
+    build_infracost_baseline,
     prepare_file_payloads,
     run_checkov,
     run_infracost_diff,
@@ -113,25 +116,46 @@ def security_node(state: ReviewState) -> dict[str, list[Finding]]:
     return {"security": _filter_to_changed(findings, changed)}
 
 
-def cost_node(state: ReviewState) -> dict[str, list[Finding]]:
-    """infracost diff against the configured baseline, then LLM annotation."""
+def cost_node(state: ReviewState) -> dict[str, object]:
+    """infracost diff against the base ref, then LLM annotation.
 
-    if not state.cost_baseline_path:
-        log.info("cost.skipped", reason="no infracost baseline configured")
+    Gated on the infracost API key — when it's unset the agent skips. The base
+    breakdown comes from ``cost_baseline_path`` when one was supplied (CI may
+    inject it), otherwise it's generated on the fly from the workspace's git
+    history. Returns both the per-resource findings and a ``cost_summary`` (the
+    head's absolute monthly total + the change), so the report can show both.
+    """
+
+    if settings.infracost_api_key is None:
+        log.info("cost.skipped", reason="no infracost api key")
         return {"cost": []}
     payloads = prepare_file_payloads(state.pr, state.workspace)
     if not payloads:
         return {"cost": []}
     try:
-        raw: list[Finding] = run_infracost_diff.invoke(
-            {"working_dir": state.workspace, "baseline_path": state.cost_baseline_path}
+        baseline = state.cost_baseline_path or build_infracost_baseline(
+            state.workspace, state.pr.repository
+        )
+        result = run_infracost_diff.invoke(
+            {"working_dir": state.workspace, "baseline_path": baseline}
         )
     except ScannerError as exc:
         log.warning("scanner.skipped", scanner="infracost", error=str(exc))
         return {"cost": []}
-    if not raw:
-        return {"cost": []}
-    return {"cost": _review_with_llm("cost", prompts.COST_SYSTEM_PROMPT, raw, payloads)}
+
+    report = result if isinstance(result, CostReport) else CostReport.model_validate(result)
+    summary = report.summary
+    log.info(
+        "cost.ran",
+        total_monthly=summary.total_monthly if summary else None,
+        delta_monthly=summary.delta_monthly if summary else None,
+    )
+    findings = (
+        _review_with_llm("cost", prompts.COST_SYSTEM_PROMPT, report.findings, payloads)
+        if report.findings
+        else []
+    )
+    return {"cost": findings, "cost_summary": summary}
 
 
 def style_node(state: ReviewState) -> dict[str, list[Finding]]:
@@ -159,5 +183,5 @@ def aggregator_node(state: ReviewState) -> dict[str, str]:
     feeds it the joined findings and the PR context for file:line links.
     """
 
-    markdown = render_comment(state.all_findings(), state.pr)
+    markdown = render_comment(state.all_findings(), state.pr, state.cost_summary)
     return {"comment_markdown": markdown}

@@ -12,10 +12,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import SecretStr
 
 from terraform_review_agent.utils import nodes
 from terraform_review_agent.utils.state import (
     ChangedFile,
+    CostReport,
+    CostSummary,
     Finding,
     LLMFinding,
     PRContext,
@@ -30,13 +33,13 @@ from terraform_review_agent.utils.tools import ScannerError
 
 
 class _FakeTool:
-    """Stand-in for a scanner ``@tool``: returns findings or raises on invoke."""
+    """Stand-in for a scanner ``@tool``: returns a canned result or raises on invoke."""
 
-    def __init__(self, result: list[Finding] | Exception) -> None:
+    def __init__(self, result: Any) -> None:
         self._result = result
         self.calls: list[dict[str, Any]] = []
 
-    def invoke(self, payload: dict[str, Any]) -> list[Finding]:
+    def invoke(self, payload: dict[str, Any]) -> Any:
         self.calls.append(payload)
         if isinstance(self._result, Exception):
             raise self._result
@@ -256,30 +259,36 @@ def test_security_node_tolerates_missing_scanner_binary(
 # ---------------------------------------------------------------------------
 
 
-def test_cost_node_skips_without_baseline(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_cost_node_skips_without_api_key(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # Gate is the infracost key: even with a baseline present, no key => skip.
+    monkeypatch.setattr(nodes.settings, "infracost_api_key", None)
     _forbid_llm(monkeypatch)
     (tmp_path / "main.tf").write_text('resource "aws_instance" "w" {}\n')
-    state = _state(tmp_path, files=[ChangedFile(path="main.tf")], baseline=None)
+    state = _state(tmp_path, files=[ChangedFile(path="main.tf")], baseline=str(tmp_path / "b.json"))
 
     assert nodes.cost_node(state) == {"cost": []}
 
 
 def test_cost_node_runs_infracost_then_llm(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(nodes.settings, "infracost_api_key", SecretStr("k"))
     (tmp_path / "main.tf").write_text('resource "aws_instance" "w" {}\n')
     baseline = tmp_path / "baseline.json"
     baseline.write_text("{}")
     state = _state(tmp_path, files=[ChangedFile(path="main.tf")], baseline=str(baseline))
 
     infracost = _FakeTool(
-        [
-            Finding(
-                agent="cost",
-                severity="medium",
-                file="main.tf",
-                rule="infracost:resource-delta",
-                message="raw delta",
-            )
-        ]
+        CostReport(
+            findings=[
+                Finding(
+                    agent="cost",
+                    severity="medium",
+                    file="main.tf",
+                    rule="infracost:resource-delta",
+                    message="raw delta",
+                )
+            ],
+            summary=CostSummary(total_monthly=26.0, delta_monthly=25.0),
+        )
     )
     monkeypatch.setattr(nodes, "run_infracost_diff", infracost)
     _patch_llm(
@@ -302,25 +311,83 @@ def test_cost_node_runs_infracost_then_llm(monkeypatch: pytest.MonkeyPatch, tmp_
     assert infracost.calls == [{"working_dir": str(tmp_path), "baseline_path": str(baseline)}]
     assert [f.agent for f in out["cost"]] == ["cost"]
     assert out["cost"][0].message.startswith("+$25")
+    # The absolute total + delta are surfaced via cost_summary.
+    assert out["cost_summary"] == CostSummary(total_monthly=26.0, delta_monthly=25.0)
 
 
-def test_cost_node_skips_when_infracost_finds_nothing(
+def test_cost_node_auto_generates_baseline_when_unset(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    # No pre-built baseline => the node builds one from the workspace git history.
+    monkeypatch.setattr(nodes.settings, "infracost_api_key", SecretStr("k"))
+    (tmp_path / "main.tf").write_text('resource "aws_instance" "w" {}\n')
+    state = _state(tmp_path, files=[ChangedFile(path="main.tf")], baseline=None)
+
+    monkeypatch.setattr(nodes, "build_infracost_baseline", lambda wd, name: "/tmp/generated.json")
+    infracost = _FakeTool(
+        CostReport(
+            findings=[
+                Finding(
+                    agent="cost",
+                    severity="medium",
+                    file="main.tf",
+                    rule="infracost:resource-delta",
+                    message="raw",
+                )
+            ],
+            summary=CostSummary(total_monthly=10.0, delta_monthly=5.0),
+        )
+    )
+    monkeypatch.setattr(nodes, "run_infracost_diff", infracost)
+    _patch_llm(
+        monkeypatch,
+        SpecialistReview(
+            findings=[
+                LLMFinding(
+                    severity="medium",
+                    file="main.tf",
+                    rule="infracost:resource-delta",
+                    message="+$5/mo",
+                )
+            ]
+        ),
+    )
+
+    out = nodes.cost_node(state)
+
+    assert infracost.calls == [
+        {"working_dir": str(tmp_path), "baseline_path": "/tmp/generated.json"}
+    ]
+    assert [f.agent for f in out["cost"]] == ["cost"]
+
+
+def test_cost_node_reports_summary_with_no_resource_change(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Cost-neutral PR: no per-resource findings (so no LLM call), but the
+    # absolute total is still surfaced via cost_summary.
+    monkeypatch.setattr(nodes.settings, "infracost_api_key", SecretStr("k"))
     _forbid_llm(monkeypatch)
     (tmp_path / "main.tf").write_text('resource "aws_instance" "w" {}\n')
     baseline = tmp_path / "baseline.json"
     baseline.write_text("{}")
     state = _state(tmp_path, files=[ChangedFile(path="main.tf")], baseline=str(baseline))
 
-    monkeypatch.setattr(nodes, "run_infracost_diff", _FakeTool([]))
+    summary = CostSummary(total_monthly=21.90, delta_monthly=0.0)
+    monkeypatch.setattr(
+        nodes, "run_infracost_diff", _FakeTool(CostReport(findings=[], summary=summary))
+    )
 
-    assert nodes.cost_node(state) == {"cost": []}
+    out = nodes.cost_node(state)
+
+    assert out["cost"] == []
+    assert out["cost_summary"] == summary
 
 
 def test_cost_node_tolerates_infracost_error(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    monkeypatch.setattr(nodes.settings, "infracost_api_key", SecretStr("k"))
     _forbid_llm(monkeypatch)
     (tmp_path / "main.tf").write_text('resource "aws_instance" "w" {}\n')
     baseline = tmp_path / "baseline.json"

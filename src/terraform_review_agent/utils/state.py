@@ -126,6 +126,20 @@ class SpecialistReview(BaseModel):
     findings: list[LLMFinding] = Field(default_factory=list)
 
 
+class CostSummary(BaseModel):
+    """Absolute monthly cost of the PR head plus the change vs. the base ref."""
+
+    total_monthly: float
+    delta_monthly: float
+
+
+class CostReport(BaseModel):
+    """infracost diff output: per-resource delta findings + the cost summary."""
+
+    findings: list[Finding] = Field(default_factory=list)
+    summary: CostSummary | None = None
+
+
 class ReviewState(BaseModel):
     """Top-level graph state.
 
@@ -145,6 +159,7 @@ class ReviewState(BaseModel):
     )
     security: list[Finding] = Field(default_factory=list)
     cost: list[Finding] = Field(default_factory=list)
+    cost_summary: CostSummary | None = None
     style: list[Finding] = Field(default_factory=list)
     comment_markdown: str | None = None
     posted_comment_id: int | None = None

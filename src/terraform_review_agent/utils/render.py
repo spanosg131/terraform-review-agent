@@ -6,10 +6,10 @@ The aggregator collapses the three specialist branches into a single comment:
    identity, keeping the most severe instance.
 2. :func:`sort_findings` orders them by severity, then file/line, for a stable
    render (and stable test snapshots).
-3. :func:`render_comment` emits GitHub-flavored markdown: each finding leads
-   with its message; critical/high/medium show inline as severity sections,
-   ``low``/``info`` collapse into a ``<details>`` block, and a compact per-agent
-   count line sits in the summary.
+3. :func:`render_comment` emits GitHub-flavored markdown: a headline 💰 cost
+   callout (absolute monthly total + the PR's delta), then findings as severity
+   tables (badge · agent | issue | location); critical/high/medium show inline,
+   ``low``/``info`` collapse into a ``<details>`` block.
 
 The hidden sticky marker is intentionally *not* embedded here — the GitHub
 client owns it (see :meth:`GitHubClient.upsert_sticky_comment`), so the rendered
@@ -25,6 +25,7 @@ from urllib.parse import quote
 from terraform_review_agent.utils.state import (
     SEVERITY_ORDER,
     AgentName,
+    CostSummary,
     Finding,
     PRContext,
     Severity,
@@ -149,23 +150,44 @@ def _file_ref(pr: PRContext, finding: Finding) -> str:
     return f"[`{_code(label)}`]({url})"
 
 
-def _render_finding(pr: PRContext, finding: Finding) -> list[str]:
-    """One bullet per finding, leading with the message, plus a suggestion sub-bullet.
+def _cell(value: str) -> str:
+    """Inline-sanitize free text and escape pipes so it can't break a table cell."""
 
-    Severity is conveyed by the enclosing section header, so it is not repeated
-    on the bullet; the message comes first (it's what a reviewer scans for),
-    followed by the location link and the ``rule · agent`` provenance. Untrusted
-    fields (``rule``, ``message``, ``suggestion``, ``file``) are sanitized;
-    ``agent`` is a constrained literal.
+    return _inline(value).replace("|", "\\|")
+
+
+def _finding_table(pr: PRContext, findings: list[Finding]) -> list[str]:
+    """Render findings as a markdown table: severity badge · agent | issue | location.
+
+    The issue cell stacks the message, an optional suggestion, and the rule (as
+    small text) with ``<br>`` so the table stays three columns wide and scannable.
     """
 
-    lines = [
-        f"- {_SEVERITY_EMOJI[finding.severity]} **{_inline(finding.message)}** "
-        f"— {_file_ref(pr, finding)} · `{_code(finding.rule)}` · {finding.agent}"
-    ]
-    if finding.suggestion:
-        lines.append(f"  - _Suggestion:_ {_inline(finding.suggestion)}")
-    return lines
+    rows = ["| Severity | Issue | Location |", "|:--|:--|:--|"]
+    for f in findings:
+        badge = f"{_SEVERITY_EMOJI[f.severity]} {_AGENT_EMOJI[f.agent]}"
+        issue = f"**{_cell(f.message)}**"
+        if f.suggestion:
+            issue += f" <br> 💡 {_cell(f.suggestion)}"
+        issue += f" <br> <sub>`{_cell(_code(f.rule))}`</sub>"
+        location = _file_ref(pr, f).replace("|", "\\|")
+        rows.append(f"| {badge} | {issue} | {location} |")
+    return rows
+
+
+def _cost_callout(summary: CostSummary | None) -> list[str]:
+    """A headline cost line: absolute monthly total + the change from this PR."""
+
+    if summary is None:
+        return []
+    total = f"**${summary.total_monthly:,.2f}/mo** total"
+    delta = summary.delta_monthly
+    if abs(delta) < 0.005:
+        change = "**no change** from this PR"
+    else:
+        sign = "-" if delta < 0 else "+"
+        change = f"**{sign}${abs(delta):,.2f}/mo** from this PR"
+    return [f"> 💰 **Cost:** {total} · {change}", ""]
 
 
 def _summary_lines(findings: list[Finding]) -> list[str]:
@@ -202,8 +224,8 @@ def _severity_sections(pr: PRContext, findings: list[Finding]) -> list[str]:
         if not group:
             continue
         parts.append(f"### {_SEVERITY_EMOJI[sev]} {_SEVERITY_LABELS[sev]} ({len(group)})")
-        for finding in group:
-            parts.extend(_render_finding(pr, finding))
+        parts.append("")
+        parts.extend(_finding_table(pr, group))
         parts.append("")
     return parts
 
@@ -218,26 +240,32 @@ def _collapsed_section(pr: PRContext, findings: list[Finding]) -> list[str]:
         if not sub:
             continue
         parts.append(f"#### {_SEVERITY_EMOJI[sev]} {_SEVERITY_LABELS[sev]} ({len(sub)})")
-        for finding in sub:
-            parts.extend(_render_finding(pr, finding))
+        parts.append("")
+        parts.extend(_finding_table(pr, sub))
         parts.append("")
     parts.append("</details>")
     parts.append("")
     return parts
 
 
-def render_comment(findings: list[Finding], pr: PRContext) -> str:
+def render_comment(
+    findings: list[Finding],
+    pr: PRContext,
+    cost_summary: CostSummary | None = None,
+) -> str:
     """Render the full sticky-comment body for ``pr`` (marker added by caller)."""
 
     ordered = sort_findings(dedupe_findings(findings))
     parts: list[str] = ["## Terraform Review", ""]
 
     if not ordered:
+        parts.extend(_cost_callout(cost_summary))
         parts.append(_NO_FINDINGS)
-        return "\n".join(parts) + "\n"
+        return "\n".join(parts).rstrip() + "\n"
 
     parts.extend(_summary_lines(ordered))
     parts.append("")
+    parts.extend(_cost_callout(cost_summary))
     parts.extend(_severity_sections(pr, ordered))
     parts.extend(_collapsed_section(pr, ordered))
 

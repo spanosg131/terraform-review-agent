@@ -11,7 +11,13 @@ from terraform_review_agent.utils.render import (
     render_comment,
     sort_findings,
 )
-from terraform_review_agent.utils.state import AgentName, Finding, PRContext, Severity
+from terraform_review_agent.utils.state import (
+    AgentName,
+    CostSummary,
+    Finding,
+    PRContext,
+    Severity,
+)
 
 
 def _pr() -> PRContext:
@@ -208,11 +214,12 @@ def test_render_summary_counts_files_and_findings() -> None:
 def test_render_finding_leads_with_message_not_severity() -> None:
     md = render_comment([_f(severity="high", message="Public bucket", rule="tfsec:x")], _pr())
 
-    # The badge + bolded message lead; rule/agent are trailing provenance, and
-    # the textual severity token is not repeated (the section header carries it).
-    assert "- 🟠 **Public bucket** — " in md
-    assert "· `tfsec:x` · security" in md
-    assert "- `high` ·" not in md
+    # Findings render as a table; the row carries a severity+agent badge, the
+    # bolded message, and the rule as small text.
+    assert "| Severity | Issue | Location |" in md
+    assert "🟠 🔒" in md
+    assert "**Public bucket**" in md
+    assert "`tfsec:x`" in md
 
 
 def test_render_file_line_link_pinned_to_head_sha() -> None:
@@ -231,10 +238,29 @@ def test_render_lineless_finding_link_has_no_anchor() -> None:
     assert "#L" not in md
 
 
-def test_render_includes_suggestion_sub_bullet_when_present() -> None:
+def test_render_includes_suggestion_in_issue_cell() -> None:
     md = render_comment([_f(suggestion="Set acl=private")], _pr())
 
-    assert "  - _Suggestion:_ Set acl=private" in md
+    assert "💡 Set acl=private" in md
+
+
+def test_render_cost_callout_shows_total_and_delta() -> None:
+    md = render_comment([_f()], _pr(), CostSummary(total_monthly=26.5, delta_monthly=5.0))
+
+    assert "> 💰 **Cost:** **$26.50/mo** total · **+$5.00/mo** from this PR" in md
+
+
+def test_render_cost_callout_reports_no_change_for_zero_delta() -> None:
+    md = render_comment([_f()], _pr(), CostSummary(total_monthly=21.9, delta_monthly=0.0))
+
+    assert "> 💰 **Cost:** **$21.90/mo** total · **no change** from this PR" in md
+
+
+def test_render_cost_callout_shown_even_with_no_findings() -> None:
+    md = render_comment([], _pr(), CostSummary(total_monthly=21.9, delta_monthly=0.0))
+
+    assert "> 💰 **Cost:**" in md
+    assert "No issues found in the changed Terraform files." in md
 
 
 # ---------------------------------------------------------------------------
@@ -320,18 +346,22 @@ def test_render_full_comment_snapshot() -> None:
                 "_By agent:_ 🔒 Security 2",
                 "",
                 "### 🔴 Critical (1)",
-                "- 🔴 **Public S3 bucket** — "
-                "[`main.tf:10`](https://github.com/acme/example/blob/deadbeef/main.tf#L10) "
-                "· `tfsec:aws-s3-no-public` · security",
-                "  - _Suggestion:_ Set acl=private",
+                "",
+                "| Severity | Issue | Location |",
+                "|:--|:--|:--|",
+                "| 🔴 🔒 | **Public S3 bucket** <br> 💡 Set acl=private <br> "
+                "<sub>`tfsec:aws-s3-no-public`</sub> | "
+                "[`main.tf:10`](https://github.com/acme/example/blob/deadbeef/main.tf#L10) |",
                 "",
                 "<details>",
                 "<summary>Low &amp; info (1)</summary>",
                 "",
                 "#### ⚪ Info (1)",
-                "- ⚪ **Consider tagging** — "
-                "[`variables.tf`](https://github.com/acme/example/blob/deadbeef/variables.tf) "
-                "· `security:llm-note` · security",
+                "",
+                "| Severity | Issue | Location |",
+                "|:--|:--|:--|",
+                "| ⚪ 🔒 | **Consider tagging** <br> <sub>`security:llm-note`</sub> | "
+                "[`variables.tf`](https://github.com/acme/example/blob/deadbeef/variables.tf) |",
                 "",
                 "</details>",
             ]

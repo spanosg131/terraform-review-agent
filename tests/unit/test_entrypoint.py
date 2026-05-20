@@ -8,11 +8,29 @@ is monkeypatched per case. We assert on the helper directly and on the exit code
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from terraform_review_agent import entrypoint
-from terraform_review_agent.entrypoint import GATING_EXIT_CODE, _max_severity_finding
+from terraform_review_agent.entrypoint import (
+    GATING_EXIT_CODE,
+    _ensure_workspace,
+    _max_severity_finding,
+)
 from terraform_review_agent.utils.state import Finding, PRContext, ReviewState
+
+
+def _pr() -> PRContext:
+    return PRContext(
+        repository="acme/example",
+        pr_number=7,
+        base_sha="a" * 7,
+        head_sha="b" * 7,
+        base_ref="main",
+        head_ref="feature/x",
+    )
+
 
 _ARGV = ["--repository", "acme/example", "--pr-number", "7"]
 
@@ -22,15 +40,7 @@ def _finding(severity: str, rule: str = "r") -> Finding:
 
 
 def _state(*, findings: list[Finding], skipped: bool = False) -> ReviewState:
-    pr = PRContext(
-        repository="acme/example",
-        pr_number=7,
-        base_sha="a" * 7,
-        head_sha="b" * 7,
-        base_ref="main",
-        head_ref="feature/x",
-    )
-    return ReviewState(pr=pr, security=findings, skipped=skipped)
+    return ReviewState(pr=_pr(), security=findings, skipped=skipped)
 
 
 # ---------------------------------------------------------------------------
@@ -91,3 +101,30 @@ def test_main_skipped_run_never_gates(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     monkeypatch.setattr(entrypoint.settings, "fail_on_severity", "critical")
     assert entrypoint.main(_ARGV) == 0
+
+
+# ---------------------------------------------------------------------------
+# _ensure_workspace
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_workspace_uses_existing_checkout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / ".git").mkdir()
+
+    def _no_clone(_pr_arg: PRContext) -> str:
+        raise AssertionError("must not clone when the workspace is already a checkout")
+
+    monkeypatch.setattr(entrypoint, "_clone_pr_workspace", _no_clone)
+
+    assert _ensure_workspace(_pr(), str(tmp_path)) == str(tmp_path)
+
+
+def test_ensure_workspace_clones_when_not_a_checkout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # No .git in base_dir => the PR must be cloned into a fresh workspace.
+    monkeypatch.setattr(entrypoint, "_clone_pr_workspace", lambda _pr_arg: "/tmp/cloned-ws")
+
+    assert _ensure_workspace(_pr(), str(tmp_path)) == "/tmp/cloned-ws"

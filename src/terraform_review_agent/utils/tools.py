@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, Literal
 
@@ -30,7 +31,14 @@ import structlog
 from langchain_core.tools import tool
 from pydantic import BaseModel
 
-from terraform_review_agent.utils.state import ChangedFile, Finding, PRContext, Severity
+from terraform_review_agent.utils.state import (
+    ChangedFile,
+    CostReport,
+    CostSummary,
+    Finding,
+    PRContext,
+    Severity,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -359,7 +367,21 @@ def _coerce_float(value: Any) -> float | None:
         return None
 
 
-def _parse_infracost_diff(payload: dict[str, Any], working_dir: Path) -> list[Finding]:
+def _format_delta(value: float) -> str:
+    """Render a signed monthly cost like ``+$25.00`` / ``-$25.00`` (sign before $)."""
+
+    return f"{'-' if value < 0 else '+'}${abs(value):,.2f}"
+
+
+def _parse_infracost_diff(payload: dict[str, Any], working_dir: Path) -> CostReport:
+    """Parse ``infracost diff`` JSON into per-resource findings + a cost summary.
+
+    The summary carries the head's absolute monthly total and the change vs. the
+    base (the top-level ``totalMonthlyCost`` / ``diffTotalMonthlyCost``). The
+    per-project total is intentionally not emitted as a finding — the summary
+    represents it, rendered as a headline callout rather than a severity row.
+    """
+
     findings: list[Finding] = []
     for project in payload.get("projects") or []:
         project_path = project.get("name") or (project.get("metadata") or {}).get("path") or "."
@@ -379,41 +401,31 @@ def _parse_infracost_diff(payload: dict[str, Any], working_dir: Path) -> list[Fi
                     rule="infracost:resource-delta",
                     message=(
                         f"Estimated monthly cost change for `{resource_name}`: "
-                        f"${monthly_delta:+,.2f}"
+                        f"{_format_delta(monthly_delta)}"
                     ),
                     suggestion=None,
                 )
             )
 
-        total_delta = _coerce_float(
-            diff.get("totalMonthlyCost") or project.get("diffTotalMonthlyCost")
+    total_monthly = _coerce_float(payload.get("totalMonthlyCost"))
+    summary = (
+        CostSummary(
+            total_monthly=total_monthly,
+            delta_monthly=_coerce_float(payload.get("diffTotalMonthlyCost")) or 0.0,
         )
-        if total_delta:
-            findings.append(
-                Finding(
-                    agent="cost",
-                    severity=_severity_for_cost_delta(total_delta),
-                    file=_relpath(project_path, working_dir),
-                    line=None,
-                    rule="infracost:total-delta",
-                    message=(
-                        f"Estimated total monthly cost change for project "
-                        f"`{project_path}`: ${total_delta:+,.2f}"
-                    ),
-                    suggestion=None,
-                )
-            )
-    return findings
+        if total_monthly is not None
+        else None
+    )
+    return CostReport(findings=findings, summary=summary)
 
 
 @tool
-def run_infracost_diff(working_dir: str, baseline_path: str) -> list[Finding]:
-    """Run ``infracost diff`` and return normalized cost findings.
+def run_infracost_diff(working_dir: str, baseline_path: str) -> CostReport:
+    """Run ``infracost diff`` and return cost findings + a total/delta summary.
 
     ``baseline_path`` must point at a JSON file produced by
     ``infracost breakdown --path <dir> --format json --out-file ...`` against
-    the PR's base ref. The reusable workflow is responsible for generating it
-    before this tool runs.
+    the PR's base ref (see :func:`build_infracost_baseline`).
     """
 
     binary = _which_or_raise("infracost")
@@ -437,6 +449,68 @@ def run_infracost_diff(working_dir: str, baseline_path: str) -> list[Finding]:
     except json.JSONDecodeError as exc:
         raise ScannerError(f"infracost produced invalid JSON: {exc}") from exc
     return _parse_infracost_diff(payload, cwd)
+
+
+def build_infracost_baseline(working_dir: str, project_name: str) -> str:
+    """Generate the base-ref breakdown JSON consumed by ``infracost diff``.
+
+    The workspace HEAD is the PR's merge commit, so its first parent (``HEAD^1``)
+    is the base branch tip. We materialize that base tree in a throwaway git
+    worktree, run ``infracost breakdown`` over it, and return the JSON path.
+
+    ``infracost diff`` pairs the baseline and the PR head *by project name*. The
+    head is named after its git remote (``owner/repo``), but the base worktree
+    has no remote and would be named after its temp path — so the two wouldn't
+    match and infracost would report the head as fully added and the base as
+    fully removed instead of a real delta. We therefore pin the baseline's
+    project name to ``project_name`` (the head's ``owner/repo``) so they pair up.
+
+    Raises :class:`ScannerError` on any failure so the cost node skips cleanly.
+    """
+
+    git = _which_or_raise("git")
+    infracost = _which_or_raise("infracost")
+    repo = Path(working_dir)
+    # `-c safe.directory=*`: in CI the checkout is owned by a different uid than
+    # the (root) container user, which git otherwise refuses to operate on.
+    safe = ["-c", "safe.directory=*"]
+
+    base_sha = _run([git, *safe, "rev-parse", "HEAD^1"], cwd=repo).stdout.strip()
+    if not base_sha:
+        raise ScannerError("could not resolve base ref (HEAD^1) for the infracost baseline")
+
+    scratch = Path(tempfile.mkdtemp(prefix="tfr-cost-"))
+    worktree = scratch / "base"
+    out_file = scratch / "infracost-base.json"
+    try:
+        _run([git, *safe, "worktree", "add", "--detach", str(worktree), base_sha], cwd=repo)
+        _run(
+            [
+                infracost,
+                "breakdown",
+                "--path",
+                str(worktree),
+                "--format",
+                "json",
+                "--out-file",
+                str(out_file),
+            ],
+            cwd=worktree,
+        )
+    finally:
+        subprocess.run(
+            [git, *safe, "worktree", "remove", "--force", str(worktree)],
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    data = json.loads(out_file.read_text())
+    for project in data.get("projects") or []:
+        project["name"] = project_name
+    out_file.write_text(json.dumps(data))
+    return str(out_file)
 
 
 # ---------------------------------------------------------------------------
