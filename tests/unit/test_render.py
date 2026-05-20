@@ -247,19 +247,19 @@ def test_render_includes_suggestion_in_issue_cell() -> None:
 def test_render_cost_callout_shows_total_and_delta() -> None:
     md = render_comment([_f()], _pr(), CostSummary(total_monthly=26.5, delta_monthly=5.0))
 
-    assert "> 💰 **Cost:** **$26.50/mo** total · **+$5.00/mo** from this PR" in md
+    assert "> 💰 **Infracost estimate:** **$26.50/mo** total · **+$5.00/mo** from this PR" in md
 
 
 def test_render_cost_callout_reports_no_change_for_zero_delta() -> None:
     md = render_comment([_f()], _pr(), CostSummary(total_monthly=21.9, delta_monthly=0.0))
 
-    assert "> 💰 **Cost:** **$21.90/mo** total · **no change** from this PR" in md
+    assert "> 💰 **Infracost estimate:** **$21.90/mo** total · **no change** from this PR" in md
 
 
 def test_render_cost_callout_shown_even_with_no_findings() -> None:
     md = render_comment([], _pr(), CostSummary(total_monthly=21.9, delta_monthly=0.0))
 
-    assert "> 💰 **Cost:**" in md
+    assert "> 💰 **Infracost estimate:**" in md
     assert "No issues found in the changed Terraform files." in md
 
 

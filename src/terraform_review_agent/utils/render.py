@@ -187,7 +187,7 @@ def _cost_callout(summary: CostSummary | None) -> list[str]:
     else:
         sign = "-" if delta < 0 else "+"
         change = f"**{sign}${abs(delta):,.2f}/mo** from this PR"
-    return [f"> 💰 **Cost:** {total} · {change}", ""]
+    return [f"> 💰 **Infracost estimate:** {total} · {change}", ""]
 
 
 def _summary_lines(findings: list[Finding]) -> list[str]:
