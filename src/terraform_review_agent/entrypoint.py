@@ -19,11 +19,31 @@ from dataclasses import dataclass
 import structlog
 
 from terraform_review_agent.agent import agent
-from terraform_review_agent.config import Settings, settings
+from terraform_review_agent.config import FailOnSeverity, Settings, settings
 from terraform_review_agent.github_client import GitHubClient
-from terraform_review_agent.utils.state import PRContext, ReviewState
+from terraform_review_agent.utils.state import SEVERITY_ORDER, Finding, PRContext, ReviewState
 
 log = structlog.get_logger(__name__)
+
+# Exit code returned when findings trip the configured `fail_on_severity` floor,
+# so consumers can gate CI on it. Distinct from 1 (unexpected error).
+GATING_EXIT_CODE = 2
+
+
+def _max_severity_finding(findings: list[Finding], threshold: FailOnSeverity) -> Finding | None:
+    """Return the highest-severity finding at or above ``threshold``, else ``None``.
+
+    ``"none"`` disables gating. Severity ranks ascend by leniency (critical=0),
+    so a finding trips the gate when its rank is ``<=`` the threshold's rank.
+    """
+
+    if threshold == "none":
+        return None
+    floor = SEVERITY_ORDER[threshold]
+    gating = [f for f in findings if f.severity_rank <= floor]
+    if not gating:
+        return None
+    return min(gating, key=lambda f: f.severity_rank)
 
 
 @dataclass(frozen=True)
@@ -113,7 +133,21 @@ def run(
 def main(argv: list[str] | None = None) -> int:
     _configure_logging(settings)
     args = _parse_args(argv)
-    run(args.repository, args.pr_number)
+    final = run(args.repository, args.pr_number)
+
+    if final.skipped:
+        return 0
+
+    gating = _max_severity_finding(final.all_findings(), settings.fail_on_severity)
+    if gating is not None:
+        log.warning(
+            "failing run: finding meets fail_on_severity floor",
+            threshold=settings.fail_on_severity,
+            severity=gating.severity,
+            rule=gating.rule,
+            file=gating.file,
+        )
+        return GATING_EXIT_CODE
     return 0
 
 

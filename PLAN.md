@@ -112,17 +112,33 @@ Parallel branches write to disjoint fields — no reducer needed.
 ### Phase 6 — Prebuilt container image
 - [x] Extend `Dockerfile` to bundle pinned `terraform`, `tfsec`, `tflint`, `infracost` binaries + `checkov` (in the `.venv`)
 - [x] Single image used for both local `docker compose` dev and CI — entrypoint runs `terraform_review_agent.entrypoint`
-- [x] `.github/workflows/build-image.yml` — buildx + layer cache, pushes to GHCR on `main` and version tags
-- [x] Tagging: `vX.Y.Z` per release, `v1` major float, `sha-<short>` per commit, `latest` for `main`
+- [x] `.github/workflows/build-image.yml` — buildx + layer cache, pushes to GHCR on version tags (`v*.*.*`) and manual dispatch only
+- [x] Tagging: `vX.Y.Z` per release, `v1` major float, `sha-<short>` per build commit, `latest` for stable release tags
 - [x] Smoke test inside the image that every binary resolves on `PATH`
 
 ### Phase 7 — Reusable workflow
-- [ ] `.github/workflows/terraform-review.yml` (`workflow_call`, inputs/secrets above)
-- [ ] Job uses `container: ghcr.io/spanosg131/terraform-review-agent:v1` — no per-run scanner installs
-- [ ] `actions/checkout@v4` with `fetch-depth: 0` so the base ref is available for `infracost diff`
-- [ ] Concurrency group + `cancel-in-progress`
-- [ ] `.github/workflows/example-caller.yml` (docs-only sample)
-- [ ] End-to-end run on a throwaway test PR
+- [x] `.github/workflows/terraform-review.yml` (`workflow_call`, inputs/secrets above)
+- [x] Job uses `container: ghcr.io/spanosg131/terraform-review-agent:v1` — no per-run scanner installs
+- [x] `actions/checkout@v4` with `fetch-depth: 0` so the base ref is available for `infracost diff`
+- [x] Concurrency group + `cancel-in-progress`
+- [x] `examples/example-caller.yml` (docs-only sample — kept out of `.github/workflows/` so it doesn't run in this repo)
+- [ ] End-to-end run on a throwaway test PR _(requires a live repo + published `:v1` image; run manually)_
+
+> **Phase 7 notes:**
+> - `fail-on-severity` is now functional: `config.fail_on_severity` + an exit-code
+>   gate in `entrypoint.main` (exit 2 when a finding meets/exceeds the floor;
+>   `none` never gates). Covered by `tests/unit/test_entrypoint.py`.
+> - `paths` is realized as the caller's `on.pull_request.paths` trigger (see
+>   `examples/example-caller.yml`), not a reusable-workflow input — the entrypoint
+>   already filters to `*.tf`/`*.tfvars` and early-exits when none changed.
+> - `workflow_dispatch` runs carry no PR context, so the reusable workflow takes
+>   a `pr-number` input (fallback to the pull_request event) and the caller's
+>   dispatch supplies it; without it the CLI exits on `--pr-number ''`.
+> - Reusable-workflow `llm-provider` defaults to `openai`/`gpt-4o` (a coherent
+>   pair); other providers must set `llm-model` to match (example uses anthropic).
+> - The container runs as root (`options: --user root`) because GitHub-hosted
+>   container jobs mount the workspace as uid 1001, which the image's non-root
+>   `app` user cannot write.
 
 ### Phase 8 — Tests + polish
 - [ ] Integration test: compiled graph end-to-end with mocked LLM + recorded scanner output

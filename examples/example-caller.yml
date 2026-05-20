@@ -1,0 +1,46 @@
+name: example-caller
+
+# DOCS-ONLY sample showing how a consumer repo wires up the reusable reviewer.
+# It lives in examples/ (NOT .github/workflows/) on purpose, so GitHub does not
+# execute it in this repo. Copy it into your own .github/workflows/ and point
+# `uses:` at a pinned version tag.
+#
+# The `paths` filter lives here, on the trigger — it decides whether a review
+# runs at all. The reviewer additionally early-exits if no Terraform files
+# actually changed, so this filter is just to avoid spinning up the job.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    # Mirror the reviewer's recognized Terraform suffixes (TERRAFORM_SUFFIXES in
+    # state.py): HCL and the JSON variants. `*.tf` does NOT match `*.tf.json`.
+    paths:
+      - "**/*.tf"
+      - "**/*.tfvars"
+      - "**/*.tf.json"
+      - "**/*.tfvars.json"
+  workflow_dispatch: # manual re-run
+    inputs:
+      pr-number:
+        description: "PR number to review (required — dispatch has no PR context)."
+        required: true
+        type: string
+
+jobs:
+  terraform-review:
+    # Pin to a released tag (or the v1 major float) of THIS repo.
+    uses: spanosg131/terraform-review-agent/.github/workflows/terraform-review.yml@v1
+    permissions:
+      contents: read
+      pull-requests: write
+    with:
+      llm-provider: anthropic
+      llm-model: claude-sonnet-4-5
+      fail-on-severity: high # fail the check on any high/critical finding
+      # pull_request runs read the event; manual runs use the dispatch input.
+      pr-number: ${{ github.event.pull_request.number || inputs.pr-number }}
+    secrets:
+      anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+      infracost-api-key: ${{ secrets.INFRACOST_API_KEY }}
+      # github-token defaults to the caller's github.token; override only if you
+      # need a token with broader scope.

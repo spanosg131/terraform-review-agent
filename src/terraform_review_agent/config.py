@@ -15,6 +15,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 LLMProvider = Literal["openai", "anthropic", "google"]
 Environment = Literal["development", "staging", "production"]
+# "none" disables CI gating; otherwise the run fails when a finding's severity
+# meets or exceeds this floor. Mirrors `Severity` in utils.state plus "none".
+FailOnSeverity = Literal["critical", "high", "medium", "low", "info", "none"]
 
 
 class Settings(BaseSettings):
@@ -44,6 +47,8 @@ class Settings(BaseSettings):
 
     infracost_api_key: SecretStr | None = None
     infracost_baseline_path: str | None = None
+
+    fail_on_severity: FailOnSeverity = "none"
 
     workspace_dir: str = "."
 

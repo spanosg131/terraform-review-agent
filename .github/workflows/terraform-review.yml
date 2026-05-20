@@ -1,0 +1,122 @@
+name: terraform-review
+
+# Reusable workflow (workflow_call) that runs the LangGraph Terraform reviewer
+# inside the prebuilt GHCR image and posts a single sticky PR comment. Consumers
+# call it from their own `pull_request` workflow — see example-caller.yml.
+#
+# The image bundles terraform/tfsec/tflint/infracost + checkov, so there are no
+# per-run scanner installs. Scanner versions are pinned in the image, not here.
+
+on:
+  workflow_call:
+    inputs:
+      llm-provider:
+        description: "LLM provider: openai | anthropic | google."
+        type: string
+        default: openai
+      llm-model:
+        description: "Model id — must match the provider (default suits openai)."
+        type: string
+        default: gpt-4o
+      fail-on-severity:
+        description: >-
+          Gate CI when a finding meets/exceeds this floor:
+          critical | high | medium | low | info | none. Default never fails.
+        type: string
+        default: none
+      pr-number:
+        description: >-
+          PR to review. Defaults to the triggering pull_request event; pass it
+          explicitly for workflow_dispatch runs, which carry no PR context.
+        type: string
+        default: ""
+    secrets:
+      openai-api-key:
+        required: false
+      anthropic-api-key:
+        required: false
+      google-api-key:
+        required: false
+      infracost-api-key:
+        description: "Enables the cost agent; it is skipped when unset."
+        required: false
+      github-token:
+        description: "Defaults to the caller's github.token when unset."
+        required: false
+
+# One in-flight review per PR; a new push cancels the previous run.
+concurrency:
+  group: terraform-review-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      pull-requests: write
+
+    container:
+      image: ghcr.io/spanosg131/terraform-review-agent:v1
+      # The image ships a non-root `app` user, but GitHub-hosted container jobs
+      # mount the workspace (and the $GITHUB_ENV/$GITHUB_OUTPUT command files) as
+      # uid 1001, which a non-root container user cannot write. Run as root so
+      # checkout, the infracost worktree, and the review can read/write them.
+      # (For a *private* image, add a `credentials:` block here.)
+      options: --user root
+
+    env:
+      # Provider selection + secrets, read by config.Settings inside the image.
+      DEFAULT_LLM_PROVIDER: ${{ inputs.llm-provider }}
+      DEFAULT_LLM_MODEL: ${{ inputs.llm-model }}
+      FAIL_ON_SEVERITY: ${{ inputs.fail-on-severity }}
+      OPENAI_API_KEY: ${{ secrets.openai-api-key }}
+      ANTHROPIC_API_KEY: ${{ secrets.anthropic-api-key }}
+      GOOGLE_API_KEY: ${{ secrets.google-api-key }}
+      INFRACOST_API_KEY: ${{ secrets.infracost-api-key }}
+      GITHUB_TOKEN: ${{ secrets.github-token || github.token }}
+
+    steps:
+      - name: Checkout PR (full history for infracost base diff)
+        uses: actions/checkout@v4
+        with:
+          # The cost agent diffs the PR head against its base ref, so the base
+          # commit must be reachable locally.
+          fetch-depth: 0
+
+      - name: Infracost baseline (base ref)
+        # Skipped when no infracost key is configured; the cost agent then skips.
+        if: ${{ env.INFRACOST_API_KEY != '' }}
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -uo pipefail
+          # git refuses to operate on a tree owned by another uid without this.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          if ! git worktree add --detach /tmp/tfr-base "$BASE_SHA"; then
+            echo "could not check out base ref; cost agent will be skipped" >&2
+            exit 0
+          fi
+          git config --global --add safe.directory /tmp/tfr-base
+          if infracost breakdown --path /tmp/tfr-base \
+               --format json --out-file /tmp/infracost-base.json; then
+            echo "INFRACOST_BASELINE_PATH=/tmp/infracost-base.json" >> "$GITHUB_ENV"
+          else
+            echo "infracost baseline failed; cost agent will be skipped" >&2
+          fi
+
+      - name: Review Terraform changes
+        env:
+          # Explicit input wins; fall back to the pull_request event. On
+          # workflow_dispatch the event carries no PR, so the input is required.
+          PR_NUMBER: ${{ inputs.pr-number || github.event.pull_request.number }}
+        run: |
+          set -uo pipefail
+          if [ -z "$PR_NUMBER" ]; then
+            echo "no PR number resolved; pass the 'pr-number' input for manual runs" >&2
+            exit 1
+          fi
+          python -m terraform_review_agent.entrypoint \
+            --repository "$GITHUB_REPOSITORY" \
+            --pr-number "$PR_NUMBER"
