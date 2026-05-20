@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "terraform-review-agent"
-version = "0.1.0"
+version = "1.0.0"
 description = "LangGraph multi-agent reviewer for Terraform pull requests."
 requires-python = ">=3.13,<3.14"
 license = { text = "MIT" }
