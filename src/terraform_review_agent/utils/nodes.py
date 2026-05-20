@@ -39,6 +39,7 @@ from terraform_review_agent.utils.tools import (
     FilePayload,
     ScannerError,
     build_infracost_baseline,
+    build_synced_usage_file,
     prepare_file_payloads,
     run_checkov,
     run_infracost_diff,
@@ -122,8 +123,11 @@ def cost_node(state: ReviewState) -> dict[str, object]:
     Gated on the infracost API key — when it's unset the agent skips. The base
     breakdown comes from ``cost_baseline_path`` when one was supplied (CI may
     inject it), otherwise it's generated on the fly from the workspace's git
-    history. Returns both the per-resource findings and a ``cost_summary`` (the
-    head's absolute monthly total + the change), so the report can show both.
+    history. A usage file is auto-synced from the PR's Terraform (no per-repo
+    setup) so usage-based resources are priced from infracost's defaults on both
+    the base and head; if the sync fails the totals fall back to fixed costs.
+    Returns both the per-resource findings and a ``cost_summary`` (the head's
+    absolute monthly total + the change), so the report can show both.
     """
 
     if settings.infracost_api_key is None:
@@ -132,12 +136,17 @@ def cost_node(state: ReviewState) -> dict[str, object]:
     payloads = prepare_file_payloads(state.pr, state.workspace)
     if not payloads:
         return {"cost": []}
+    usage_file = build_synced_usage_file(state.workspace)
     try:
         baseline = state.cost_baseline_path or build_infracost_baseline(
-            state.workspace, state.pr.repository
+            state.workspace, state.pr.repository, usage_file_path=usage_file
         )
         result = run_infracost_diff.invoke(
-            {"working_dir": state.workspace, "baseline_path": baseline}
+            {
+                "working_dir": state.workspace,
+                "baseline_path": baseline,
+                "usage_file_path": usage_file,
+            }
         )
     except ScannerError as exc:
         log.warning("scanner.skipped", scanner="infracost", error=str(exc))
@@ -149,6 +158,7 @@ def cost_node(state: ReviewState) -> dict[str, object]:
         "cost.ran",
         total_monthly=summary.total_monthly if summary else None,
         delta_monthly=summary.delta_monthly if summary else None,
+        usage_file_synced=usage_file is not None,
     )
     findings = (
         _review_with_llm("cost", prompts.COST_SYSTEM_PROMPT, report.findings, payloads)

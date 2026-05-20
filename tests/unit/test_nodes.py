@@ -101,6 +101,14 @@ def _state(
     )
 
 
+@pytest.fixture(autouse=True)
+def _no_usage_sync(monkeypatch: pytest.MonkeyPatch) -> None:
+    # cost_node auto-syncs an infracost usage file, which shells out to
+    # infracost. Default it off so unit tests don't; the cost tests that care
+    # about usage-file threading override this.
+    monkeypatch.setattr(nodes, "build_synced_usage_file", lambda _wd: None)
+
+
 # ---------------------------------------------------------------------------
 # security
 # ---------------------------------------------------------------------------
@@ -308,7 +316,13 @@ def test_cost_node_runs_infracost_then_llm(monkeypatch: pytest.MonkeyPatch, tmp_
 
     out = nodes.cost_node(state)
 
-    assert infracost.calls == [{"working_dir": str(tmp_path), "baseline_path": str(baseline)}]
+    assert infracost.calls == [
+        {
+            "working_dir": str(tmp_path),
+            "baseline_path": str(baseline),
+            "usage_file_path": None,
+        }
+    ]
     assert [f.agent for f in out["cost"]] == ["cost"]
     assert out["cost"][0].message.startswith("+$25")
     # The absolute total + delta are surfaced via cost_summary.
@@ -323,7 +337,11 @@ def test_cost_node_auto_generates_baseline_when_unset(
     (tmp_path / "main.tf").write_text('resource "aws_instance" "w" {}\n')
     state = _state(tmp_path, files=[ChangedFile(path="main.tf")], baseline=None)
 
-    monkeypatch.setattr(nodes, "build_infracost_baseline", lambda wd, name: "/tmp/generated.json")
+    monkeypatch.setattr(
+        nodes,
+        "build_infracost_baseline",
+        lambda wd, name, usage_file_path=None: "/tmp/generated.json",
+    )
     infracost = _FakeTool(
         CostReport(
             findings=[
@@ -356,9 +374,49 @@ def test_cost_node_auto_generates_baseline_when_unset(
     out = nodes.cost_node(state)
 
     assert infracost.calls == [
-        {"working_dir": str(tmp_path), "baseline_path": "/tmp/generated.json"}
+        {
+            "working_dir": str(tmp_path),
+            "baseline_path": "/tmp/generated.json",
+            "usage_file_path": None,
+        }
     ]
     assert [f.agent for f in out["cost"]] == ["cost"]
+
+
+def test_cost_node_applies_synced_usage_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The auto-synced usage file is applied to BOTH the base breakdown and the
+    # head diff, so usage-based resources are priced and the delta stays
+    # apples-to-apples.
+    monkeypatch.setattr(nodes.settings, "infracost_api_key", SecretStr("k"))
+    _forbid_llm(monkeypatch)
+    (tmp_path / "main.tf").write_text('resource "aws_instance" "w" {}\n')
+    monkeypatch.setattr(nodes, "build_synced_usage_file", lambda _wd: "/tmp/usage.yml")
+    state = _state(tmp_path, files=[ChangedFile(path="main.tf")], baseline=None)
+
+    baseline_calls: list[dict[str, Any]] = []
+
+    def _fake_baseline(wd: str, name: str, usage_file_path: str | None = None) -> str:
+        baseline_calls.append({"working_dir": wd, "usage_file_path": usage_file_path})
+        return "/tmp/generated.json"
+
+    monkeypatch.setattr(nodes, "build_infracost_baseline", _fake_baseline)
+    infracost = _FakeTool(
+        CostReport(findings=[], summary=CostSummary(total_monthly=42.0, delta_monthly=0.0))
+    )
+    monkeypatch.setattr(nodes, "run_infracost_diff", infracost)
+
+    nodes.cost_node(state)
+
+    assert baseline_calls == [{"working_dir": str(tmp_path), "usage_file_path": "/tmp/usage.yml"}]
+    assert infracost.calls == [
+        {
+            "working_dir": str(tmp_path),
+            "baseline_path": "/tmp/generated.json",
+            "usage_file_path": "/tmp/usage.yml",
+        }
+    ]
 
 
 def test_cost_node_reports_summary_with_no_resource_change(

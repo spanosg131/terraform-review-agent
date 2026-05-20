@@ -24,6 +24,7 @@ from terraform_review_agent.utils.tools import (
     _parse_tflint,
     _parse_tfsec,
     _severity_for_cost_delta,
+    build_synced_usage_file,
     prepare_file_payloads,
     run_checkov,
     run_infracost_diff,
@@ -455,6 +456,85 @@ def test_run_infracost_diff_invokes_with_baseline(
     assert "diff" in cmd
     assert "--compare-to" in cmd
     assert str(baseline) in cmd
+    # No usage file given => no --usage-file flag.
+    assert "--usage-file" not in cmd
+
+
+def test_run_infracost_diff_passes_usage_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured = _stub_subprocess(
+        monkeypatch,
+        binary_path="/usr/bin/infracost",
+        completed=_completed(stdout=json.dumps({"totalMonthlyCost": "50.00"})),
+    )
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text("{}")
+    usage = tmp_path / "infracost-usage.yml"
+    usage.write_text("version: 0.1\nresource_usage: {}\n")
+
+    report = run_infracost_diff.invoke(
+        {
+            "working_dir": str(tmp_path),
+            "baseline_path": str(baseline),
+            "usage_file_path": str(usage),
+        }
+    )
+
+    cmd = captured["cmd"]
+    assert "--usage-file" in cmd
+    assert str(usage) in cmd
+    assert report.summary is not None
+    assert report.summary.total_monthly == 50.0
+
+
+def test_build_synced_usage_file_syncs_and_returns_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_which(_name: str) -> str:
+        return "/usr/bin/infracost"
+
+    def fake_run(cmd: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        captured["cmd"] = cmd
+        # Emulate infracost writing the synced usage file to the --usage-file path.
+        target = cmd[cmd.index("--usage-file") + 1]
+        Path(target).write_text("version: 0.1\nresource_usage: {}\n")
+        return _completed(stdout="{}")
+
+    monkeypatch.setattr(tools.shutil, "which", fake_which)
+    monkeypatch.setattr(tools.subprocess, "run", fake_run)
+
+    result = build_synced_usage_file(str(tmp_path))
+
+    cmd = captured["cmd"]
+    assert "breakdown" in cmd
+    assert "--sync-usage-file" in cmd
+    assert "--usage-file" in cmd
+    assert result is not None
+    assert Path(result).is_file()
+
+
+def test_build_synced_usage_file_returns_none_when_infracost_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(tools.shutil, "which", lambda _name: None)
+
+    assert build_synced_usage_file(str(tmp_path)) is None
+
+
+def test_build_synced_usage_file_returns_none_when_sync_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # infracost present but the breakdown exits non-zero => best-effort None.
+    _stub_subprocess(
+        monkeypatch,
+        binary_path="/usr/bin/infracost",
+        completed=_completed(stderr="boom", returncode=1),
+    )
+
+    assert build_synced_usage_file(str(tmp_path)) is None
 
 
 # ---------------------------------------------------------------------------

@@ -419,31 +419,75 @@ def _parse_infracost_diff(payload: dict[str, Any], working_dir: Path) -> CostRep
     return CostReport(findings=findings, summary=summary)
 
 
+def build_synced_usage_file(working_dir: str) -> str | None:
+    """Auto-generate an infracost usage file from the workspace's Terraform.
+
+    Runs ``infracost breakdown --sync-usage-file`` so usage-based resources
+    (requests, data processed, egress, ...) are priced from infracost's default
+    estimates instead of $0 — no usage file authored by the reviewed repo. The
+    file is written to a scratch dir (never inside the checkout) and applied to
+    both the base and head breakdowns so the delta stays consistent.
+
+    Best-effort: returns ``None`` if infracost is missing or the sync fails, in
+    which case cost review falls back to fixed-cost pricing.
+    """
+
+    cwd = Path(working_dir)
+    usage_file = Path(tempfile.mkdtemp(prefix="tfr-usage-")) / "infracost-usage.yml"
+    try:
+        infracost = _which_or_raise("infracost")
+        _run(
+            [
+                infracost,
+                "breakdown",
+                "--path",
+                str(cwd),
+                "--sync-usage-file",
+                "--usage-file",
+                str(usage_file),
+                "--format",
+                "json",
+            ],
+            cwd=cwd,
+        )
+    except ScannerError as exc:
+        log.warning("infracost.usage_sync_failed", error=str(exc))
+        return None
+    return str(usage_file) if usage_file.is_file() else None
+
+
 @tool
-def run_infracost_diff(working_dir: str, baseline_path: str) -> CostReport:
+def run_infracost_diff(
+    working_dir: str, baseline_path: str, usage_file_path: str | None = None
+) -> CostReport:
     """Run ``infracost diff`` and return cost findings + a total/delta summary.
 
     ``baseline_path`` must point at a JSON file produced by
     ``infracost breakdown --path <dir> --format json --out-file ...`` against
     the PR's base ref (see :func:`build_infracost_baseline`).
+
+    ``usage_file_path``, when given, prices usage-based resources (Cloud Run
+    compute, load-balancer data, egress, logging, ...) from the monthly
+    assumptions in that file. Without it the totals cover only fixed-cost
+    resources. The same file should price the baseline so the delta stays
+    apples-to-apples.
     """
 
     binary = _which_or_raise("infracost")
     cwd = Path(working_dir)
-    completed = _run(
-        [
-            binary,
-            "diff",
-            "--path",
-            str(cwd),
-            "--compare-to",
-            baseline_path,
-            "--format",
-            "json",
-        ],
-        cwd=cwd,
-        ok_exit_codes=(0,),
-    )
+    cmd = [
+        binary,
+        "diff",
+        "--path",
+        str(cwd),
+        "--compare-to",
+        baseline_path,
+        "--format",
+        "json",
+    ]
+    if usage_file_path:
+        cmd += ["--usage-file", usage_file_path]
+    completed = _run(cmd, cwd=cwd, ok_exit_codes=(0,))
     try:
         payload = json.loads(completed.stdout or "{}")
     except json.JSONDecodeError as exc:
@@ -451,7 +495,9 @@ def run_infracost_diff(working_dir: str, baseline_path: str) -> CostReport:
     return _parse_infracost_diff(payload, cwd)
 
 
-def build_infracost_baseline(working_dir: str, project_name: str) -> str:
+def build_infracost_baseline(
+    working_dir: str, project_name: str, usage_file_path: str | None = None
+) -> str:
     """Generate the base-ref breakdown JSON consumed by ``infracost diff``.
 
     The workspace HEAD is the PR's merge commit, so its first parent (``HEAD^1``)
@@ -484,19 +530,19 @@ def build_infracost_baseline(working_dir: str, project_name: str) -> str:
     out_file = scratch / "infracost-base.json"
     try:
         _run([git, *safe, "worktree", "add", "--detach", str(worktree), base_sha], cwd=repo)
-        _run(
-            [
-                infracost,
-                "breakdown",
-                "--path",
-                str(worktree),
-                "--format",
-                "json",
-                "--out-file",
-                str(out_file),
-            ],
-            cwd=worktree,
-        )
+        breakdown_cmd = [
+            infracost,
+            "breakdown",
+            "--path",
+            str(worktree),
+            "--format",
+            "json",
+            "--out-file",
+            str(out_file),
+        ]
+        if usage_file_path:
+            breakdown_cmd += ["--usage-file", usage_file_path]
+        _run(breakdown_cmd, cwd=worktree)
     finally:
         subprocess.run(
             [git, *safe, "worktree", "remove", "--force", str(worktree)],
