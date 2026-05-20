@@ -369,6 +369,52 @@ def test_run_tflint_tolerates_nonzero_exit_with_issues(
     assert run_tflint.invoke({"working_dir": str(tmp_path)}) == []
 
 
+def _record_subprocess(
+    monkeypatch: pytest.MonkeyPatch, *, binary_path: str
+) -> list[list[str]]:
+    """Patch which + subprocess.run, recording every command (not just the last)."""
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(tools.shutil, "which", lambda _name: binary_path)
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        return _completed(stdout=json.dumps({"issues": []}))
+
+    monkeypatch.setattr(tools.subprocess, "run", fake_run)
+    return calls
+
+
+def test_run_tflint_initializes_plugins_when_config_present(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Regression: a repo with .tflint.hcl declares plugins that need
+    `tflint --init`. Without it, tflint errors on the plugin block and the
+    repo silently loses plugin-rule style coverage."""
+
+    (tmp_path / ".tflint.hcl").write_text('plugin "aws" {\n  enabled = true\n}\n')
+    calls = _record_subprocess(monkeypatch, binary_path="/usr/bin/tflint")
+
+    run_tflint.invoke({"working_dir": str(tmp_path)})
+
+    assert ["/usr/bin/tflint", "--init"] in calls
+    init_idx = calls.index(["/usr/bin/tflint", "--init"])
+    scan_idx = next(i for i, c in enumerate(calls) if "--recursive" in c)
+    assert init_idx < scan_idx, "tflint --init must run before the scan"
+
+
+def test_run_tflint_skips_init_without_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No .tflint.hcl means no plugins to install; skip the init round-trip."""
+
+    calls = _record_subprocess(monkeypatch, binary_path="/usr/bin/tflint")
+
+    run_tflint.invoke({"working_dir": str(tmp_path)})
+
+    assert not any("--init" in c for c in calls)
+
+
 # ---------------------------------------------------------------------------
 # terraform fmt
 # ---------------------------------------------------------------------------
@@ -479,6 +525,48 @@ def test_parse_infracost_skips_zero_resources_but_keeps_summary(tmp_path: Path) 
     assert report.summary is not None
     assert report.summary.total_monthly == 21.90
     assert report.summary.delta_monthly == 0.0
+
+
+def test_parse_infracost_uses_metadata_path_not_repo_name(tmp_path: Path) -> None:
+    """Regression: the head project is named after its git remote (owner/repo),
+    which is not a repo file path. The finding file must come from metadata.path
+    so rendered blob links point at a real path, not /blob/sha/owner/repo."""
+
+    payload = {
+        "totalMonthlyCost": "50.00",
+        "diffTotalMonthlyCost": "10.00",
+        "projects": [
+            {
+                "name": "acme/infra-repo",
+                "metadata": {"path": "modules/db"},
+                "diff": {"resources": [{"name": "aws_db_instance.main", "monthlyCost": "10.0"}]},
+            }
+        ],
+    }
+
+    report = _parse_infracost_diff(payload, tmp_path)
+
+    assert [f.file for f in report.findings] == ["modules/db"]
+    assert all(f.file != "acme/infra-repo" for f in report.findings)
+
+
+def test_parse_infracost_falls_back_to_dot_when_no_metadata_path(tmp_path: Path) -> None:
+    """Without metadata.path, fall back to "." (repo root), never the repo name."""
+
+    payload = {
+        "totalMonthlyCost": "10.00",
+        "diffTotalMonthlyCost": "10.00",
+        "projects": [
+            {
+                "name": "acme/infra-repo",
+                "diff": {"resources": [{"name": "aws_s3_bucket.logs", "monthlyCost": "10.0"}]},
+            }
+        ],
+    }
+
+    report = _parse_infracost_diff(payload, tmp_path)
+
+    assert [f.file for f in report.findings] == ["."]
 
 
 def test_run_infracost_diff_invokes_with_baseline(

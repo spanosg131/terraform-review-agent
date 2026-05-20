@@ -287,13 +287,17 @@ def _parse_tflint(payload: dict[str, Any], working_dir: Path) -> list[Finding]:
 def run_tflint(working_dir: str) -> list[Finding]:
     """Run tflint under ``working_dir`` and return normalized style findings.
 
-    Callers are responsible for ``tflint --init`` having installed any plugins
-    the project requires; this wrapper only invokes the scanner. tflint exits
-    non-zero (1/2) when issues are found, which is treated as a successful run.
+    When the workspace ships a ``.tflint.hcl``, ``tflint --init`` is run first so
+    any plugins it declares (e.g. the aws/google/azurerm rulesets) are installed;
+    without it tflint errors on the plugin block and the repo loses plugin-rule
+    coverage. ``GITHUB_TOKEN`` (set in CI) raises the plugin download rate limit.
+    tflint exits non-zero (1/2) when issues are found, treated as a successful run.
     """
 
     binary = _which_or_raise("tflint")
     cwd = Path(working_dir)
+    if (cwd / ".tflint.hcl").is_file():
+        _run([binary, "--init"], cwd=cwd)
     completed = _run(
         [binary, "--format=json", "--recursive"],
         cwd=cwd,
@@ -392,7 +396,10 @@ def _parse_infracost_diff(payload: dict[str, Any], working_dir: Path) -> CostRep
 
     findings: list[Finding] = []
     for project in payload.get("projects") or []:
-        project_path = project.get("name") or (project.get("metadata") or {}).get("path") or "."
+        # Use metadata.path (the project dir), not name: the head project is
+        # named after its git remote (`owner/repo`), which is not a repo file
+        # path and renders as a broken blob link.
+        project_path = (project.get("metadata") or {}).get("path") or "."
         diff = project.get("diff") or {}
 
         for resource in diff.get("resources") or []:
