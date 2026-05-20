@@ -2,7 +2,11 @@ name: terraform-review
 
 # Reusable workflow (workflow_call) that runs the LangGraph Terraform reviewer
 # inside the prebuilt GHCR image and posts a single sticky PR comment. Consumers
-# call it from their own `pull_request` workflow — see example-caller.yml.
+# call it from their own `pull_request` workflow — see examples/example-caller.yml.
+#
+# The review is always keyed off a PR *number* (from the event or the pr-number
+# input) and checks out that PR's merge ref, so a workflow_dispatch rerun reviews
+# the PR rather than whatever branch was selected for the manual run.
 #
 # The image bundles terraform/tfsec/tflint/infracost + checkov, so there are no
 # per-run scanner installs. Scanner versions are pinned in the image, not here.
@@ -44,9 +48,10 @@ on:
         description: "Defaults to the caller's github.token when unset."
         required: false
 
-# One in-flight review per PR; a new push cancels the previous run.
+# One in-flight review per PR; a new push (or rerun) cancels the previous one.
+# Keyed off the PR number so dispatch reruns and pull_request runs share a group.
 concurrency:
-  group: terraform-review-${{ github.event.pull_request.number || github.ref }}
+  group: terraform-review-${{ inputs.pr-number || github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -78,22 +83,42 @@ jobs:
       GITHUB_TOKEN: ${{ secrets.github-token || github.token }}
 
     steps:
-      - name: Checkout PR (full history for infracost base diff)
+      - name: Resolve PR number
+        # Explicit input wins; fall back to the pull_request event. On
+        # workflow_dispatch the event carries no PR, so the input is required.
+        env:
+          PR_NUMBER: ${{ inputs.pr-number || github.event.pull_request.number }}
+        run: |
+          set -uo pipefail
+          if [ -z "$PR_NUMBER" ]; then
+            echo "no PR number resolved; pass the 'pr-number' input for manual runs" >&2
+            exit 1
+          fi
+          echo "PR_NUMBER=$PR_NUMBER" >> "$GITHUB_ENV"
+
+      - name: Checkout the PR merge ref (full history for infracost base diff)
         uses: actions/checkout@v4
         with:
-          # The cost agent diffs the PR head against its base ref, so the base
-          # commit must be reachable locally.
+          # Review the PR by number, never the triggering ref — otherwise a
+          # workflow_dispatch rerun would scan the selected branch (e.g. main)
+          # instead of the PR. refs/pull/<n>/merge is the same ref a pull_request
+          # event checks out by default. fetch-depth: 0 keeps the merge commit's
+          # base parent reachable for the infracost diff below.
+          ref: refs/pull/${{ env.PR_NUMBER }}/merge
           fetch-depth: 0
 
       - name: Infracost baseline (base ref)
         # Skipped when no infracost key is configured; the cost agent then skips.
         if: ${{ env.INFRACOST_API_KEY != '' }}
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -uo pipefail
           # git refuses to operate on a tree owned by another uid without this.
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          # HEAD is the merge commit; its first parent is the base branch tip.
+          if ! BASE_SHA="$(git rev-parse HEAD^1)"; then
+            echo "could not resolve base ref; cost agent will be skipped" >&2
+            exit 0
+          fi
           if ! git worktree add --detach /tmp/tfr-base "$BASE_SHA"; then
             echo "could not check out base ref; cost agent will be skipped" >&2
             exit 0
@@ -107,16 +132,8 @@ jobs:
           fi
 
       - name: Review Terraform changes
-        env:
-          # Explicit input wins; fall back to the pull_request event. On
-          # workflow_dispatch the event carries no PR, so the input is required.
-          PR_NUMBER: ${{ inputs.pr-number || github.event.pull_request.number }}
+        # PR_NUMBER is exported via $GITHUB_ENV by the resolve step above.
         run: |
-          set -uo pipefail
-          if [ -z "$PR_NUMBER" ]; then
-            echo "no PR number resolved; pass the 'pr-number' input for manual runs" >&2
-            exit 1
-          fi
           python -m terraform_review_agent.entrypoint \
             --repository "$GITHUB_REPOSITORY" \
             --pr-number "$PR_NUMBER"

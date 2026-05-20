@@ -134,6 +134,10 @@ Parallel branches write to disjoint fields — no reducer needed.
 > - `workflow_dispatch` runs carry no PR context, so the reusable workflow takes
 >   a `pr-number` input (fallback to the pull_request event) and the caller's
 >   dispatch supplies it; without it the CLI exits on `--pr-number ''`.
+> - Checkout is keyed off the resolved PR number (`refs/pull/<n>/merge`), not the
+>   triggering ref, and the infracost base SHA is derived from the merge commit's
+>   first parent (`HEAD^1`). Otherwise a dispatch rerun would scan the selected
+>   branch (e.g. `main`) instead of the PR head, since scanners read `workspace="."`.
 > - Reusable-workflow `llm-provider` defaults to `openai`/`gpt-4o` (a coherent
 >   pair); other providers must set `llm-model` to match (example uses anthropic).
 > - The container runs as root (`options: --user root`) because GitHub-hosted
