@@ -1,5 +1,23 @@
 # terraform-review-agent
 
+[![CI](https://github.com/infiniumtek/terraform-review-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/infiniumtek/terraform-review-agent/actions/workflows/ci.yml)
+[![Build Image](https://github.com/infiniumtek/terraform-review-agent/actions/workflows/build-image.yml/badge.svg)](https://github.com/infiniumtek/terraform-review-agent/actions/workflows/build-image.yml)
+[![License: MIT](https://img.shields.io/github/license/infiniumtek/terraform-review-agent?color=green)](LICENSE)
+
+![Python 3.13](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)
+![LangGraph](https://img.shields.io/badge/LangGraph-1C3C3C?logo=langchain&logoColor=white)
+![Pydantic v2](https://img.shields.io/badge/Pydantic-v2-E92063?logo=pydantic&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white)
+![Terraform](https://img.shields.io/badge/Terraform-844FBA?logo=terraform&logoColor=white)
+![uv](https://img.shields.io/badge/uv-DE5FE9?logo=uv&logoColor=white)
+![Ruff](https://img.shields.io/badge/Ruff-D7FF64?logo=ruff&logoColor=black)
+![mypy: strict](https://img.shields.io/badge/mypy-strict-2A6DB2?logo=python&logoColor=white)
+
+**LLM providers:**
+![OpenAI](https://img.shields.io/badge/OpenAI-412991?logo=openai&logoColor=white)
+![Anthropic](https://img.shields.io/badge/Anthropic-191919?logo=anthropic&logoColor=white)
+![Google Gemini](https://img.shields.io/badge/Google%20Gemini-8E75B2?logo=googlegemini&logoColor=white)
+
 A reusable GitHub Actions workflow that reviews Terraform pull requests with a
 LangGraph multi-agent system and posts a single, severity-ranked sticky comment.
 
