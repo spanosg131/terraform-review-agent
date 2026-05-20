@@ -1,0 +1,49 @@
+# Keep the Docker build context small and secret-free. The Dockerfile only
+# COPYs pyproject.toml, uv.lock, src/, and scripts/; everything below is a
+# secret, a dev-only artifact, or VCS metadata that must never reach the builder
+# (and must never end up in a pushed image layer).
+
+# Secrets / local env
+.env
+.env.*
+!.env.example
+
+# Virtualenv (rebuilt inside the image)
+.venv/
+
+# Python caches / build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+*.whl
+
+# Local SQLite state / data
+data/*.sqlite
+data/*.sqlite-journal
+data/*.sqlite-wal
+data/*.sqlite-shm
+
+# Version control
+.git/
+.gitignore
+
+# CI / tests / docs not needed to build the image
+.github/
+tests/
+*.md
+
+# Docker / tooling meta
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# IDE / OS cruft
+.vscode/
+.idea/
+*.swp
+.DS_Store

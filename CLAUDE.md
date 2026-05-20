@@ -52,13 +52,15 @@ All importable code lives under `src/[package_name]/`. `agent.py` exposes the co
 
 ```bash
 python3.13 -m venv .venv && source .venv/bin/activate
-pip install uv && uv pip install -e ".[dev]"
-cp .env.example .env          # fill in keys
+pip install uv
+uv sync --inexact --extra dev   # exact versions from uv.lock (--inexact keeps uv/pip)
+cp .env.example .env            # fill in keys
 ```
 
 - ❌ Never `pip install` outside `.venv`
 - ❌ Never invoke a bare `python` — always activate `.venv` first
 - ❌ Never commit `.env`, `data/*.sqlite`, `.venv/`, `__pycache__`
+- 📌 Deps are pinned in `uv.lock` (committed). After editing `pyproject.toml`, run `uv lock` (or `make lock`); `make lint` runs `uv lock --check` and fails on drift.
 
 ---
 

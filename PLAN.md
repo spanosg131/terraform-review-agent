@@ -110,11 +110,11 @@ Parallel branches write to disjoint fields — no reducer needed.
 - [x] Unit tests for dedupe + renderer snapshots
 
 ### Phase 6 — Prebuilt container image
-- [ ] Extend `Dockerfile` to bundle pinned `terraform`, `tfsec`, `tflint`, `infracost` binaries + `checkov` (in the `.venv`)
-- [ ] Single image used for both local `docker compose` dev and CI — entrypoint runs `terraform_review_agent.entrypoint`
-- [ ] `.github/workflows/build-image.yml` — buildx + layer cache, pushes to GHCR on `main` and version tags
-- [ ] Tagging: `vX.Y.Z` per release, `v1` major float, `sha-<short>` per commit, `latest` for `main`
-- [ ] Smoke test inside the image that every binary resolves on `PATH`
+- [x] Extend `Dockerfile` to bundle pinned `terraform`, `tfsec`, `tflint`, `infracost` binaries + `checkov` (in the `.venv`)
+- [x] Single image used for both local `docker compose` dev and CI — entrypoint runs `terraform_review_agent.entrypoint`
+- [x] `.github/workflows/build-image.yml` — buildx + layer cache, pushes to GHCR on `main` and version tags
+- [x] Tagging: `vX.Y.Z` per release, `v1` major float, `sha-<short>` per commit, `latest` for `main`
+- [x] Smoke test inside the image that every binary resolves on `PATH`
 
 ### Phase 7 — Reusable workflow
 - [ ] `.github/workflows/terraform-review.yml` (`workflow_call`, inputs/secrets above)

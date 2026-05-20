@@ -1,0 +1,43 @@
+name: ci
+
+# Lint, type-check, and test the Python code on every PR and on pushes to main.
+# Runs the same `make` targets developers use locally (CLAUDE.md §8) so CI and
+# local checks never drift. `make lint` also runs `uv lock --check`, failing the
+# build if pyproject.toml and uv.lock disagree.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies (from uv.lock)
+        run: make install
+
+      - name: Lint (ruff + uv.lock drift check)
+        run: make lint
+
+      - name: Type check (mypy --strict)
+        run: make type
+
+      - name: Test (pytest)
+        run: make test

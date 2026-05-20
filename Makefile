@@ -1,4 +1,4 @@
-.PHONY: venv install fmt lint type test run docker-build docker-up clean
+.PHONY: venv install lock lock-check fmt lint type test run docker-build docker-up clean
 
 PY      := ./.venv/bin/python
 PIP     := ./.venv/bin/pip
@@ -12,13 +12,19 @@ venv:
 	$(PIP) install --upgrade pip uv
 
 install: venv
-	$(UV) pip install -e ".[dev]"
+	$(UV) sync --frozen --inexact --extra dev
+
+lock:
+	$(UV) lock
+
+lock-check:
+	$(UV) lock --check
 
 fmt:
 	$(RUFF) format src tests
 	$(RUFF) check --fix src tests
 
-lint:
+lint: lock-check
 	$(RUFF) check src tests
 	$(RUFF) format --check src tests
 

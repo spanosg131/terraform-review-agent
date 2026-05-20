@@ -1,0 +1,81 @@
+name: build-image
+
+# Builds the prebuilt reviewer image and pushes it to GHCR. Triggered on version
+# tags only (v*.*.*) — images are release artifacts, not built on every main
+# push. The reusable workflow (Phase 7) runs its job inside this image, so there
+# are no per-run scanner installs.
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: build-image-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # latest=auto tags `latest` on the newest stable semver tag (skips
+          # pre-releases). vX.Y.Z + vX major float + sha-<short> per commit.
+          flavor: latest=auto
+          tags: |
+            type=semver,pattern=v{{version}}
+            type=semver,pattern=v{{major}}
+            type=sha,prefix=sha-,format=short
+
+      # Build once into the local daemon (amd64, the CI/runner target) so the
+      # smoke test runs against the exact artifact before anything is pushed.
+      - name: Build image (load for smoke test)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: terraform-review-agent:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test (binaries resolve on PATH)
+        run: docker run --rm --entrypoint /app/scripts/smoke_test.sh terraform-review-agent:ci
+
+      # Re-run as a push; all layers are served from the gha cache above.
+      - name: Push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

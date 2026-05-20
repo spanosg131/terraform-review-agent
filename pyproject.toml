@@ -29,6 +29,13 @@ dev = [
     "mypy>=1.11",
     "types-requests",
 ]
+# Scanner installed into the container image (kept out of the default/dev
+# install — local unit tests mock the checkov subprocess). Pinned here so the
+# lockfile captures checkov *and its transitive tree*; the binary scanners
+# (terraform/tfsec/tflint/infracost) stay pinned via Dockerfile ARGs.
+container = [
+    "checkov==3.2.529",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/terraform_review_agent"]
