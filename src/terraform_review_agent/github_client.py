@@ -142,6 +142,7 @@ class GitHubClient:
                         additions=item.get("additions", 0),
                         deletions=item.get("deletions", 0),
                         patch=item.get("patch"),
+                        previous_path=item.get("previous_filename"),
                     )
                 )
             if len(batch) < 100:

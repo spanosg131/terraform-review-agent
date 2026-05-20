@@ -556,3 +556,19 @@ def test_prepare_file_payloads_falls_back_to_patch_when_file_missing(
     assert len(payloads) == 1
     assert payloads[0].mode == "diff_only"
     assert payloads[0].content.startswith("@@")
+
+
+def test_prepare_file_payloads_includes_terraform_renamed_to_non_terraform(
+    tmp_path: Path,
+) -> None:
+    # main.tf renamed to main.txt: the HCL content lives on disk under the new
+    # (non-.tf) path, so the previous_path must qualify it as a candidate.
+    (tmp_path / "main.txt").write_text('resource "aws_s3_bucket" "b" {}\n')
+    pr = _pr([ChangedFile(path="main.txt", status="renamed", previous_path="main.tf")])
+
+    payloads = prepare_file_payloads(pr, tmp_path)
+
+    assert len(payloads) == 1
+    assert payloads[0].path == "main.txt"
+    assert payloads[0].mode == "full"
+    assert payloads[0].content.startswith('resource "aws_s3_bucket"')

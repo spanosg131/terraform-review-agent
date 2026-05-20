@@ -448,8 +448,6 @@ PER_FILE_CONTENT_CAP_BYTES = 32 * 1024
 TOTAL_CONTENT_THRESHOLD_BYTES = 256 * 1024
 TRUNCATION_MARKER = "\n... [content truncated by terraform-review-agent]"
 
-_TERRAFORM_SUFFIXES = (".tf", ".tfvars", ".tf.json", ".tfvars.json")
-
 PayloadMode = Literal["full", "truncated", "diff_only"]
 
 
@@ -492,9 +490,7 @@ def prepare_file_payloads(
     """
 
     base = Path(working_dir)
-    candidates: list[ChangedFile] = [
-        f for f in pr.changed_files if f.path.endswith(_TERRAFORM_SUFFIXES)
-    ]
+    candidates: list[ChangedFile] = [f for f in pr.changed_files if f.is_terraform]
 
     full_payloads: list[FilePayload] = []
     total_bytes = 0

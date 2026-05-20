@@ -53,6 +53,28 @@ def test_pr_context_recognises_terraform_file_variants(path: str) -> None:
     assert pr.has_terraform_changes is True
 
 
+def test_pr_context_detects_terraform_renamed_to_non_terraform() -> None:
+    # Renaming main.tf -> main.txt drops resources from Terraform's view; the
+    # pre-rename path must still register as a Terraform change.
+    pr = _pr(
+        [
+            ChangedFile(path="main.txt", status="renamed", previous_path="main.tf"),
+        ]
+    )
+
+    assert pr.has_terraform_changes is True
+
+
+def test_changed_file_is_terraform_uses_previous_path() -> None:
+    renamed_away = ChangedFile(path="main.txt", status="renamed", previous_path="main.tf")
+    renamed_into = ChangedFile(path="main.tf", status="renamed", previous_path="main.txt")
+    non_tf = ChangedFile(path="docs/readme.txt", status="renamed", previous_path="docs/notes.txt")
+
+    assert renamed_away.is_terraform is True
+    assert renamed_into.is_terraform is True
+    assert non_tf.is_terraform is False
+
+
 def test_finding_severity_rank_matches_order() -> None:
     critical = Finding(
         agent="security",

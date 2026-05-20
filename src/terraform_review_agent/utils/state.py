@@ -13,6 +13,8 @@ from pydantic import BaseModel, ConfigDict, Field
 Severity = Literal["critical", "high", "medium", "low", "info"]
 AgentName = Literal["security", "cost", "style"]
 
+TERRAFORM_SUFFIXES = (".tf", ".tfvars", ".tf.json", ".tfvars.json")
+
 SEVERITY_ORDER: dict[Severity, int] = {
     "critical": 0,
     "high": 1,
@@ -32,6 +34,19 @@ class ChangedFile(BaseModel):
     additions: int = 0
     deletions: int = 0
     patch: str | None = None
+    previous_path: str | None = None
+
+    @property
+    def is_terraform(self) -> bool:
+        """True if the new or pre-rename path is a Terraform file.
+
+        Renaming a ``.tf`` to a non-Terraform suffix drops its resources from
+        Terraform's view, so the old path must count as a Terraform change.
+        """
+
+        return self.path.endswith(TERRAFORM_SUFFIXES) or bool(
+            self.previous_path and self.previous_path.endswith(TERRAFORM_SUFFIXES)
+        )
 
 
 class PRContext(BaseModel):
@@ -49,10 +64,7 @@ class PRContext(BaseModel):
 
     @property
     def has_terraform_changes(self) -> bool:
-        return any(
-            f.path.endswith((".tf", ".tfvars", ".tf.json", ".tfvars.json"))
-            for f in self.changed_files
-        )
+        return any(f.is_terraform for f in self.changed_files)
 
 
 class Finding(BaseModel):

@@ -197,6 +197,39 @@ def test_fetch_pr_context_populates_changed_files() -> None:
     assert pr.has_terraform_changes is True
 
 
+def test_fetch_pr_context_captures_previous_filename_for_rename() -> None:
+    tx = FakeTransport()
+    tx.queue(
+        "GET",
+        "/repos/acme/example/pulls/7",
+        json_body={
+            "base": {"sha": "base-sha", "ref": "main"},
+            "head": {"sha": "head-sha", "ref": "feature/x"},
+        },
+    )
+    tx.queue(
+        "GET",
+        "/repos/acme/example/pulls/7/files",
+        json_body=[
+            {
+                "filename": "infra/main.txt",
+                "status": "renamed",
+                "previous_filename": "infra/main.tf",
+                "additions": 0,
+                "deletions": 0,
+            },
+        ],
+    )
+
+    pr = _client(tx).fetch_pr_context("acme/example", 7)
+
+    renamed = pr.changed_files[0]
+    assert renamed.status == "renamed"
+    assert renamed.previous_path == "infra/main.tf"
+    # Renaming a .tf away from a Terraform suffix must still trigger review.
+    assert pr.has_terraform_changes is True
+
+
 def test_split_repo_validates_slug() -> None:
     tx = FakeTransport()
     with pytest.raises(ValueError):
