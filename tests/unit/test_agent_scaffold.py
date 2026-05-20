@@ -33,7 +33,7 @@ def test_graph_runs_with_terraform_changes() -> None:
     assert final["style"] == []
     # With no findings the aggregator still renders a clean "all clear" comment.
     assert final["comment_markdown"] == (
-        "## Terraform Review\n\nNo issues found in the changed Terraform files.\n"
+        "## Terraform Review Agent\n\nNo issues found in the changed Terraform files.\n"
     )
 
 

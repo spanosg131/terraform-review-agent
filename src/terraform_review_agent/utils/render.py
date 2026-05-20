@@ -256,7 +256,7 @@ def render_comment(
     """Render the full sticky-comment body for ``pr`` (marker added by caller)."""
 
     ordered = sort_findings(dedupe_findings(findings))
-    parts: list[str] = ["## Terraform Review", ""]
+    parts: list[str] = ["## Terraform Review Agent", ""]
 
     if not ordered:
         parts.extend(_cost_callout(cost_summary))

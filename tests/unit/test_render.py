@@ -141,7 +141,7 @@ def test_sort_places_lineless_findings_after_located_ones_in_same_file() -> None
 
 def test_render_no_findings_message() -> None:
     assert render_comment([], _pr()) == (
-        "## Terraform Review\n\nNo issues found in the changed Terraform files.\n"
+        "## Terraform Review Agent\n\nNo issues found in the changed Terraform files.\n"
     )
 
 
@@ -286,7 +286,7 @@ def test_render_flattens_newlines_in_message_and_suggestion() -> None:
     assert "line one line two" in md
     assert "do a then b" in md
     # A newline-injected markdown heading must not become a real heading.
-    assert "\n## " not in md.replace("\n## Terraform Review", "", 1)
+    assert "\n## " not in md.replace("\n## Terraform Review Agent", "", 1)
 
 
 def test_render_neutralizes_backticks_in_rule_code_span() -> None:
@@ -339,7 +339,7 @@ def test_render_full_comment_snapshot() -> None:
     expected = (
         "\n".join(
             [
-                "## Terraform Review",
+                "## Terraform Review Agent",
                 "",
                 "**2 findings** in 2 files — 1 critical, 1 info",
                 "",
