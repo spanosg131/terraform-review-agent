@@ -34,7 +34,7 @@ concise, actionable sentence — so the set of findings is deterministic run to
 run. Results are merged, de-duplicated, severity-ranked, and upserted as one
 comment (edited in place on every push) rather than stacking up.
 
-Everything runs inside a prebuilt container (`ghcr.io/spanosg131/terraform-review-agent`)
+Everything runs inside a prebuilt container (`ghcr.io/infiniumtek/terraform-review-agent`)
 that bundles pinned `terraform`, `tfsec`, `tflint`, `infracost`, and `checkov`
 binaries, so there are **no per-run tool installs**.
 
@@ -61,7 +61,7 @@ on:
 
 jobs:
   terraform-review:
-    uses: spanosg131/terraform-review-agent/.github/workflows/terraform-review.yml@v1
+    uses: infiniumtek/terraform-review-agent/.github/workflows/terraform-review.yml@v1
     permissions:
       contents: read         # checkout
       pull-requests: write    # post/edit the sticky comment
@@ -164,7 +164,7 @@ edited in place.
 ```
 GitHub PR event
   └─► reusable workflow (terraform-review.yml)
-        └─► container: ghcr.io/spanosg131/terraform-review-agent:v1
+        └─► container: ghcr.io/infiniumtek/terraform-review-agent:v1
               └─► python -m terraform_review_agent.entrypoint
                     └─► LangGraph:
                           start ─► [security ∥ cost ∥ style] ─► aggregator ─► post_comment
@@ -226,11 +226,11 @@ as the reusable workflow does in CI.
    — open (or reuse) a PR there that touches a `.tf` file, then:
 
    ```bash
-   make run ARGS="--repository spanosg131/gcp-test-cloudrun-service --pr-number 1"
+   make run ARGS="--repository spanosg131/gcp-test-cloudrun-service --pr-number 2"
    ```
 
    The agent fetches the PR, runs the three specialists, and posts/edits the
-   sticky comment on PR #1. (You can also set `GITHUB_REPOSITORY` /
+   sticky comment on PR #2. (You can also set `GITHUB_REPOSITORY` /
    `GITHUB_PR_NUMBER` in `.env` and run `make run` with no `ARGS`.)
 
 > **Notes**
